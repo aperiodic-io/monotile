@@ -3,16 +3,18 @@
 //! its own `Historical`; partitions run side by side, the largest first. Each column a source's
 //! pipelines read is decoded on a thread of its own, ahead of the pipeline. Each
 //! symbol's messages go to `<out>/<symbol>.jsonl` once it is complete, and `_SUCCESS` lists
-//! them all once every symbol is.
+//! them all once every symbol is. Sources and the output may be in an object store: a store's
+//! files are read by the byte ranges each column needs, the output written as it comes.
 use anyhow::{anyhow, bail, Context, Result};
 use arrow_array::{Array, ArrayRef, Float64Array, Int64Array, LargeStringArray, StringArray};
 use brrrrr_core::column::{Batch, Col, Data, Strs};
 use brrrrr_core::engine::{Emit, Historical, Mapping, Output, Pool, Source, Task};
 use brrrrr_core::sql::{Catalog, Kind};
 use brrrrr_core::value::{Type, Value};
+use brrrrr_lake::files::{self as lake, Files};
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ProjectionMask;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -28,7 +30,8 @@ pub struct Args {
     #[arg(long)]
     pub sql: PathBuf,
     /// A source stream's files, `<source>=<path>` with `{symbol}` and `{day}` (YYYY-MM-DD) in the
-    /// path; one per source the SQL reads. A day without a file is a day without rows.
+    /// path, or in a store's URL (`s3://`, `gs://`, `az://`); one per source the SQL reads. A day
+    /// without a file is a day without rows.
     #[arg(long = "source", value_name = "SOURCE=PATH", required = true)]
     pub sources: Vec<String>,
     /// The first day (YYYY-MM-DD, UTC).
@@ -41,9 +44,10 @@ pub struct Args {
     /// on the first day.
     #[arg(long, value_delimiter = ',')]
     pub symbols: Vec<String>,
-    /// Where each symbol's messages go; must not exist.
+    /// Where each symbol's messages go: a directory, which must not exist, or a store's URL
+    /// (`s3://bucket/run/`), where no file must be.
     #[arg(long)]
-    pub out: PathBuf,
+    pub out: String,
     /// Symbols run at once; by default as many as there are CPUs.
     #[arg(long, value_name = "N")]
     pub threads: Option<usize>,
@@ -118,6 +122,11 @@ struct Done {
 }
 
 pub fn run(a: Args) -> Result<()> {
+    run_on(&Files::default(), a)
+}
+
+/// `run`, its files read and written through `lake` (a store of its own in tests).
+fn run_on(lake: &Files, a: Args) -> Result<()> {
     let text = std::fs::read_to_string(&a.sql).with_context(|| a.sql.display().to_string())?;
     let cat = brrrrr_core::sql::parse(&text).map_err(|e| anyhow!("{}:{e}", a.sql.display()))?;
     // planned once: each symbol runs a copy
@@ -172,27 +181,33 @@ pub fn run(a: Args) -> Result<()> {
     }
     let days: Vec<String> =
         (0..(to - from) / DAY).map(|i| brrrrr_core::expr::format_datetime(from + i * DAY, "%Y-%m-%d")).collect();
-    let symbols = if a.symbols.is_empty() { discover(&templates[&needed[0]], &days[0])? } else { a.symbols.clone() };
+    let symbols =
+        if a.symbols.is_empty() { discover(lake, &templates[&needed[0]], &days[0])? } else { a.symbols.clone() };
     if symbols.is_empty() {
         bail!("no symbols: none given, and no file of {} on {}", needed[0], days[0]);
     }
-    std::fs::create_dir(&a.out).with_context(|| format!("{}: the output directory must not exist", a.out.display()))?;
+    match local(&a.out) {
+        Some(p) => {
+            std::fs::create_dir(&p).with_context(|| format!("{}: the output directory must not exist", a.out))?
+        }
+        None if lake.has_files(&a.out)? => bail!("{}: the output must not hold files", a.out),
+        None => {}
+    }
     // each symbol's files, the largest symbol first
-    let mut parts: Vec<(String, BTreeMap<String, Vec<PathBuf>>, u64)> = vec![];
+    let mut parts: Vec<(String, BTreeMap<String, Vec<lake::File>>, u64)> = vec![];
+    let mut listed = HashMap::new();
     for sym in &symbols {
         let mut files = BTreeMap::new();
         let mut bytes = 0;
         for (src, t) in &templates {
-            let paths: Vec<PathBuf> = days
-                .iter()
-                .map(|d| PathBuf::from(t.replace("{symbol}", sym).replace("{day}", d)))
-                .filter(|p| p.exists())
-                .collect();
+            let mut found = vec![];
+            for d in &days {
+                found.extend(there(lake, &mut listed, &t.replace("{symbol}", sym).replace("{day}", d))?);
+            }
             // a path without {day}: one file for every day, read once
-            let mut paths = paths;
-            paths.dedup();
-            bytes += paths.iter().map(|p| p.metadata().map_or(0, |m| m.len())).sum::<u64>();
-            files.insert(src.clone(), paths);
+            found.dedup_by(|a, b| a.0.name == b.0.name);
+            bytes += found.iter().map(|f| f.1).sum::<u64>();
+            files.insert(src.clone(), found.into_iter().map(|f| f.0).collect());
         }
         if files.values().all(Vec::is_empty) {
             bail!("{sym}: no file of any source");
@@ -228,7 +243,7 @@ pub fn run(a: Args) -> Result<()> {
                 // the threads a symbol may decode on: its share of those of the symbols in flight
                 let share = threads / left.load(std::sync::atomic::Ordering::Relaxed).min(lanes).max(1);
                 let decode = a.decode_threads.map_or(share.clamp(1, 4), |d| d as usize);
-                let r = partition(plan, cat, a, (maps, filters), sym, files, from..to, jobs, decode);
+                let r = partition(plan, cat, a, lake, (maps, filters), sym, files, from..to, jobs, decode);
                 left.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 if let Err(e) = r.map(|d| done.lock().unwrap_or_else(|p| p.into_inner()).push(d)) {
                     failed.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(e.context(sym.clone()));
@@ -263,7 +278,7 @@ pub fn run(a: Args) -> Result<()> {
         ));
     }
     manifest.push_str("]}\n");
-    publish(&a.out, &done, &manifest)?;
+    publish(lake, &a.out, &done, &manifest)?;
     print!("{manifest}");
     Ok(())
 }
@@ -294,40 +309,88 @@ fn sync_all(paths: &[&Path]) -> Result<usize> {
     })
 }
 
-/// Every symbol's file on disk (synced side by side: past the first, a sync finds little to
-/// write), then under its name, then `_SUCCESS`: nothing is there under its name before all of
-/// it is, and on disk.
-fn publish(out: &Path, done: &[Done], manifest: &str) -> Result<()> {
+/// Every symbol's local file on disk (synced side by side: past the first, a sync finds little
+/// to write), then under its name, then `_SUCCESS`: nothing is there under its name before all
+/// of it is, and on disk. A store's files are there already, each whole: `_SUCCESS`, written
+/// last, says they all are.
+fn publish(lake: &Files, out: &str, done: &[Done], manifest: &str) -> Result<()> {
     let files: Vec<&(PathBuf, PathBuf)> = done.iter().flat_map(|d| &d.outputs).collect();
     let dirs: std::collections::BTreeSet<PathBuf> =
-        files.iter().filter_map(|(_, f)| f.parent().map(Path::to_path_buf)).chain([out.to_path_buf()]).collect();
+        files.iter().filter_map(|(_, f)| f.parent().map(Path::to_path_buf)).chain(local(out)).collect();
     sync_all(&files.iter().map(|(p, _)| p.as_path()).collect::<Vec<_>>())?;
     for (p, f) in &files {
         std::fs::rename(p, f)?;
     }
-    let mut f = File::create(out.join("_SUCCESS"))?;
+    let mut f = lake.create(&within(out, "_SUCCESS"))?;
     f.write_all(manifest.as_bytes())?;
-    f.sync_all()?;
+    f.close()?;
     // the renames and `_SUCCESS` in their directories
     sync_all(&dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>()).map(drop)
 }
 
+/// A local path's (a path, or a `file://` URL), not a store's.
+fn local(name: &str) -> Option<PathBuf> {
+    (!lake::is_url(name) || name.starts_with("file://")).then(|| name.strip_prefix("file://").unwrap_or(name).into())
+}
+
+/// `name` in the directory (or store's prefix) `dir`.
+fn within(dir: &str, name: &str) -> String {
+    format!("{}/{name}", dir.trim_end_matches('/'))
+}
+
+/// A store's directories listed, once each: the objects under each, by name.
+type Listed = HashMap<String, HashMap<String, object_store::ObjectMeta>>;
+
+/// A source's file `name`, if it is there, and its size. A store's is looked for in its
+/// directory's listing, made once (`listed`): an archive's day is a directory of many files.
+fn there(lake: &Files, listed: &mut Listed, name: &str) -> Result<Option<(lake::File, u64)>> {
+    if let Some(p) = local(name) {
+        return match p.metadata() {
+            Ok(m) => Ok(Some((lake.data_file(name, None, vec![])?, m.len()))),
+            Err(_) => Ok(None),
+        };
+    }
+    let dir = name.rsplit_once('/').map_or(name, |(d, _)| d);
+    if !listed.contains_key(dir) {
+        let objects = lake.names(dir, false)?.into_iter().filter_map(|(n, m)| Some((n, m?))).collect();
+        listed.insert(dir.to_string(), objects);
+    }
+    match listed[dir].get(name) {
+        Some(m) => Ok(Some((lake.data_file(name, Some(m.clone()), vec![])?, m.size))),
+        None => Ok(None),
+    }
+}
+
 /// The symbols `template` has a file of on `day`: its file name with `{symbol}` matched.
-fn discover(template: &str, day: &str) -> Result<Vec<String>> {
-    let path = PathBuf::from(template.replace("{day}", day));
-    let (dir, name) =
-        (path.parent().unwrap_or(Path::new(".")), path.file_name().and_then(|n| n.to_str()).unwrap_or(""));
+fn discover(lake: &Files, template: &str, day: &str) -> Result<Vec<String>> {
+    let path = template.replace("{day}", day);
+    let names: Vec<String> = match local(&path) {
+        Some(path) => {
+            let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            let mut names = vec![];
+            for e in std::fs::read_dir(dir).with_context(|| dir.display().to_string())? {
+                names.push(e?.file_name().to_string_lossy().into_owned());
+            }
+            names
+        }
+        // the objects directly under its directory
+        None => {
+            let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+            let names = lake.names(dir, false)?.into_iter().map(|(n, _)| n);
+            names
+                .filter_map(|n| n.strip_prefix(&format!("{dir}/")).filter(|n| !n.contains('/')).map(str::to_string))
+                .collect()
+        }
+    };
+    let name = path.rsplit('/').next().unwrap_or("");
     let (pre, post) =
         name.split_once("{symbol}").ok_or_else(|| anyhow!("{template}: {{symbol}} is not in the file name"))?;
-    let mut out = vec![];
-    for e in std::fs::read_dir(dir).with_context(|| dir.display().to_string())? {
-        let n = e?.file_name().to_string_lossy().into_owned();
-        if let Some(sym) = n.strip_prefix(pre).and_then(|r| r.strip_suffix(post)) {
-            if !sym.is_empty() {
-                out.push(sym.to_string());
-            }
-        }
-    }
+    let mut out: Vec<String> = names
+        .iter()
+        .filter_map(|n| n.strip_prefix(pre).and_then(|r| r.strip_suffix(post)))
+        .filter(|sym| !sym.is_empty())
+        .map(str::to_string)
+        .collect();
     out.sort();
     Ok(out)
 }
@@ -356,9 +419,10 @@ fn partition(
     plan: &Historical,
     cat: &Catalog,
     a: &Args,
+    lake: &Files,
     (maps, filters): (&Maps, &BTreeMap<String, String>),
     sym: &str,
-    files: &BTreeMap<String, Vec<PathBuf>>,
+    files: &BTreeMap<String, Vec<lake::File>>,
     range: std::ops::Range<i64>,
     pool: &dyn Pool,
     decode: usize,
@@ -366,11 +430,7 @@ fn partition(
     let started = Instant::now();
     let mut h = plan.clone();
     let mut out = match a.format {
-        Format::Jsonl => {
-            let tmp = a.out.join(format!(".{sym}.jsonl.part"));
-            let lines = Lines::new(File::create(&tmp).with_context(|| tmp.display().to_string())?);
-            Out::Lines(lines, tmp, a.out.join(format!("{sym}.jsonl")))
-        }
+        Format::Jsonl => Out::Lines(Lines::new(lake.create(&within(&a.out, &format!("{sym}.jsonl")))?)),
         Format::Parquet => Out::Parquet(Parquets::new(cat, &a.out, sym, &a.parquet_metadata)?),
     };
     let waited = Mutex::new(std::time::Duration::ZERO);
@@ -384,7 +444,9 @@ fn partition(
             if let Some(k) = path {
                 reads[k] = false;
             }
-            let paths = &files[&st.name];
+            // a store's: read by ranges, its footer read now
+            let mut paths = files[&st.name].clone();
+            lake.fetch(&mut paths)?;
             let width = st.columns.len();
             // the columns computed from the file's: those the pipelines read
             let mut mapping = None;
@@ -435,7 +497,7 @@ fn partition(
                     .filter(|(k, _)| reads[*k])
                     .map(|(k, c)| (k, c.name.clone(), c.ty.clone())),
             );
-            let mut src = Parquet::open(s, &items, width, paths, decode, a.batch_rows)?;
+            let mut src = Parquet::open(s, &items, width, &paths, decode, a.batch_rows)?;
             src.constants = path.map(|k| (k, Value::Str(sym.into()))).into_iter().collect();
             src.mapping = mapping;
             src.aliases = aliases;
@@ -443,7 +505,7 @@ fn partition(
         }
         h.run(inputs, range, pool, &mut out).map_err(|e| anyhow!(e))
     })?;
-    let (messages, outputs) = out.finish()?;
+    let (messages, outputs) = out.finish(lake)?;
     let waited = *waited.lock().unwrap_or_else(|p| p.into_inner());
     Ok(Done {
         symbol: sym.to_string(),
@@ -458,10 +520,8 @@ fn partition(
 }
 
 /// The columns of a Parquet file it can decode: Int64, Float64 and strings.
-fn file_columns(path: &Path) -> Result<Vec<(String, Type)>> {
-    let f = File::open(path).with_context(|| path.display().to_string())?;
-    let meta = ArrowReaderMetadata::load(&f, ArrowReaderOptions::default())
-        .with_context(|| format!("{}: not a Parquet file", path.display()))?;
+fn file_columns(f: &lake::File) -> Result<Vec<(String, Type)>> {
+    let meta = metadata(f)?;
     use arrow_schema::DataType as D;
     Ok(meta
         .schema()
@@ -477,6 +537,16 @@ fn file_columns(path: &Path) -> Result<Vec<(String, Type)>> {
             Some((f.name().clone(), ty))
         })
         .collect())
+}
+
+/// A file's Parquet metadata (a store's, read with its footer by `Files::fetch`).
+fn metadata(f: &lake::File) -> Result<ArrowReaderMetadata> {
+    if let Some(r) = &f.ranged {
+        return Ok(r.meta.clone());
+    }
+    let file = File::open(&f.local).with_context(|| f.name.clone())?;
+    ArrowReaderMetadata::load(&file, ArrowReaderOptions::default())
+        .with_context(|| format!("{}: not a Parquet file", f.name))
 }
 
 /// A source, and the time its reader waited for its rows.
@@ -496,15 +566,15 @@ impl<S: Source> Source for Timed<'_, S> {
 
 /// Messages as JSON lines: `{"topic":..,"headers":[[k,v],..],"payload":<the message>}`. The
 /// first write error is kept and returned by `finish`: `Output::push` cannot fail.
-struct Lines {
-    w: std::io::BufWriter<File>,
+struct Lines<W: Write> {
+    w: std::io::BufWriter<W>,
     err: Option<std::io::Error>,
     messages: u64,
     line: String,
 }
 
-impl Lines {
-    fn new(f: File) -> Lines {
+impl<W: Write> Lines<W> {
+    fn new(f: W) -> Lines<W> {
         Lines { w: std::io::BufWriter::with_capacity(1 << 20, f), err: None, messages: 0, line: String::new() }
     }
 
@@ -517,7 +587,7 @@ impl Lines {
     }
 }
 
-impl Output for Lines {
+impl<W: Write> Output for Lines<W> {
     fn push(&mut self, e: Emit) {
         if self.err.is_some() {
             return;
@@ -544,29 +614,30 @@ impl Output for Lines {
     }
 }
 
-/// Where a symbol's messages go: JSON lines (written as they come, and their file's temporary and
-/// own names), or a Parquet file per sink.
+/// Where a symbol's messages go: JSON lines (written as they come), or a Parquet file per sink.
 enum Out {
-    Lines(Lines, PathBuf, PathBuf),
+    Lines(Lines<lake::Writer>),
     Parquet(Parquets),
 }
 
 impl Out {
-    /// Writes what is left: the messages, and each file under its temporary name and its own.
-    fn finish(self) -> Result<(u64, Vec<(PathBuf, PathBuf)>)> {
+    /// Writes what is left: the messages, and each local file under its temporary name and its
+    /// own (`Writer::finish`).
+    fn finish(self, lake: &Files) -> Result<(u64, Vec<(PathBuf, PathBuf)>)> {
         match self {
-            Out::Lines(mut l, tmp, path) => {
+            Out::Lines(mut l) => {
                 l.finish()?;
-                Ok((l.messages, vec![(tmp, path)]))
+                let w = l.w.into_inner().map_err(|e| e.into_error())?;
+                Ok((l.messages, w.finish()?.into_iter().collect()))
             }
-            Out::Parquet(p) => p.finish(),
+            Out::Parquet(p) => p.finish(lake),
         }
     }
 }
 
 impl Output for Out {
     fn push(&mut self, e: Emit) {
-        if let Out::Lines(l, ..) = self {
+        if let Out::Lines(l) = self {
             l.push(e);
         }
     }
@@ -582,7 +653,7 @@ impl Output for Out {
 /// Each sink's rows (every one the SQL's views write), a Parquet file per sink:
 /// `<out>/<sink>/<symbol>.parquet`, in the sink's columns (`_tp_*` aside) and types.
 struct Parquets {
-    out: PathBuf,
+    out: String,
     symbol: String,
     /// Per sink: its columns (position in a row, name, type), and their values so far.
     sinks: BTreeMap<String, Table>,
@@ -591,7 +662,7 @@ struct Parquets {
 }
 
 impl Parquets {
-    fn new(cat: &Catalog, out: &Path, symbol: &str, metadata: &[String]) -> Result<Parquets> {
+    fn new(cat: &Catalog, out: &str, symbol: &str, metadata: &[String]) -> Result<Parquets> {
         let metadata = (metadata.iter())
             .map(|kv| {
                 kv.split_once('=')
@@ -611,7 +682,7 @@ impl Parquets {
                 (s.name.clone(), (cols, builders))
             })
             .collect();
-        Ok(Parquets { out: out.to_path_buf(), symbol: symbol.to_string(), sinks, rows: 0, metadata })
+        Ok(Parquets { out: out.to_string(), symbol: symbol.to_string(), sinks, rows: 0, metadata })
     }
 
     fn row(&mut self, sink: &str, row: &[Value]) -> bool {
@@ -623,15 +694,13 @@ impl Parquets {
         true
     }
 
-    fn finish(mut self) -> Result<(u64, Vec<(PathBuf, PathBuf)>)> {
+    fn finish(mut self, lake: &Files) -> Result<(u64, Vec<(PathBuf, PathBuf)>)> {
         let mut files = vec![];
         for (sink, (cols, builders)) in &mut self.sinks {
-            let dir = self.out.join(sink);
-            std::fs::create_dir_all(&dir).with_context(|| dir.display().to_string())?;
-            let (tmp, path) =
-                (dir.join(format!(".{}.parquet.part", self.symbol)), dir.join(format!("{}.parquet", self.symbol)));
-            write_parquet(&tmp, cols, builders, &self.metadata).with_context(|| tmp.display().to_string())?;
-            files.push((tmp, path));
+            let name = within(&self.out, &format!("{sink}/{}.parquet", self.symbol));
+            let w = std::io::BufWriter::new(lake.create(&name)?);
+            let w = write_parquet(w, cols, builders, &self.metadata).with_context(|| name.clone())?;
+            files.extend(w.into_inner().map_err(|e| e.into_error())?.finish()?);
         }
         Ok((self.rows, files))
     }
@@ -705,12 +774,12 @@ type Choice = Option<parquet::basic::Encoding>;
 /// encoding that makes it smallest, of its kind's (`candidates`): each is tried on the column
 /// alone. Floats that repeat (a price at 15 s) are smallest plain, floats that do not (a volume)
 /// split by byte; times and counts delta-packed, or in a dictionary when few.
-fn write_parquet(
-    path: &Path,
+fn write_parquet<W: Write + Send>(
+    out: W,
     cols: &[(usize, String, Type)],
     builders: &mut [Builder],
     metadata: &[(String, String)],
-) -> Result<()> {
+) -> Result<W> {
     use parquet::basic::Encoding as E;
     let floats = [Some(E::PLAIN), Some(E::BYTE_STREAM_SPLIT), None];
     let integers = [Some(E::DELTA_BINARY_PACKED), Some(E::PLAIN), None];
@@ -736,10 +805,9 @@ fn write_parquet(
         fields.push((name.clone(), a, nullable));
     }
     let batch = arrow_array::RecordBatch::try_from_iter_with_nullable(fields)?;
-    let mut w = arrow_writer(File::create(path)?, &batch, props.build())?;
+    let mut w = arrow_writer(out, &batch, props.build())?;
     w.write(&batch)?;
-    w.close()?;
-    Ok(())
+    Ok(w.into_inner()?)
 }
 
 /// The writer's properties every file and every trial has: Parquet 2, ZSTD at `level` (9 for a
@@ -863,7 +931,7 @@ const INLINE_ROWS: usize = 1 << 17;
 
 /// Row groups decoded as they are read: each column of the next, then its batches.
 struct Inline {
-    groups: Vec<(PathBuf, ArrowReaderMetadata, usize)>,
+    groups: Vec<(lake::File, ArrowReaderMetadata, usize)>,
     /// (position, name, type) of each column read
     cols: Vec<(usize, String, Type)>,
     batch_rows: usize,
@@ -881,18 +949,16 @@ impl Parquet {
         s: &'s std::thread::Scope<'s, '_>,
         items: &[(usize, String, Type)],
         width: usize,
-        files: &[PathBuf],
+        files: &[lake::File],
         threads: usize,
         batch_rows: usize,
     ) -> Result<Parquet> {
         // every row group of every file, in order
         let mut groups = vec![];
-        for path in files {
-            let f = File::open(path).with_context(|| path.display().to_string())?;
-            let meta = ArrowReaderMetadata::load(&f, ArrowReaderOptions::default())
-                .with_context(|| format!("{}: not a Parquet file", path.display()))?;
+        for f in files {
+            let meta = metadata(f)?;
             for g in 0..meta.metadata().num_row_groups() {
-                groups.push((path.clone(), meta.clone(), g));
+                groups.push((f.clone(), meta.clone(), g));
             }
         }
         let total: usize = groups.iter().map(|(_, m, i)| m.metadata().row_group(*i).num_rows() as usize).sum();
@@ -927,13 +993,12 @@ impl Parquet {
                 rx.push(r);
                 let (groups, name, ty) = (groups.clone(), name.clone(), ty.clone());
                 std::thread::Builder::new().name(format!("decode-{name}")).spawn_scoped(s, move || {
-                    for (path, meta, i) in groups.iter().skip(t).step_by(threads) {
-                        let sent =
-                            decode(path, meta, *i, &name, &ty, batch_rows, &mut |c| tx.send(Ok(Some(c))).is_ok());
+                    for (f, meta, i) in groups.iter().skip(t).step_by(threads) {
+                        let sent = decode(f, meta, *i, &name, &ty, batch_rows, &mut |c| tx.send(Ok(Some(c))).is_ok());
                         let end = match sent {
                             Ok(true) => Ok(None),
                             Ok(false) => return, // the reader is gone
-                            Err(e) => Err(format!("{}: {e:#}", path.display())),
+                            Err(e) => Err(format!("{}: {e:#}", f.name)),
                         };
                         let failed = end.is_err();
                         if tx.send(end).is_err() || failed {
@@ -991,15 +1056,15 @@ impl Source for Parquet {
     fn next(&mut self) -> Option<Result<Batch, String>> {
         if let Some(inline) = self.inline.as_mut() {
             while inline.ready.is_empty() && !inline.groups.is_empty() && !inline.cols.is_empty() {
-                let (path, meta, i) = inline.groups.remove(0);
+                let (f, meta, i) = inline.groups.remove(0);
                 let mut per_col: Vec<Vec<Col>> = vec![];
                 for (_, name, ty) in &inline.cols {
                     let mut got = vec![];
-                    if let Err(e) = decode(&path, &meta, i, name, ty, inline.batch_rows, &mut |c| {
+                    if let Err(e) = decode(&f, &meta, i, name, ty, inline.batch_rows, &mut |c| {
                         got.push(c);
                         true
                     }) {
-                        return Some(Err(format!("{}: {e:#}", path.display())));
+                        return Some(Err(format!("{}: {e:#}", f.name)));
                     }
                     per_col.push(got);
                 }
@@ -1066,7 +1131,7 @@ impl Source for Parquet {
 /// Column `name` of row group `i` of a file, as columns of `ty` of `batch_rows` rows, each to
 /// `send` as it is decoded; `false` if `send` stopped.
 fn decode(
-    path: &Path,
+    f: &lake::File,
     meta: &ArrowReaderMetadata,
     i: usize,
     name: &str,
@@ -1101,7 +1166,9 @@ fn decode(
     } else {
         meta.clone()
     };
-    let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(File::open(path)?, meta)
+    // a store's file: the column's chunk of the row group, fetched at once
+    let input = brrrrr_lake::ranged::Input::of(f, Some((i, &[leaf])))?;
+    let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(input, meta)
         .with_row_groups(vec![i])
         .with_projection(ProjectionMask::leaves(schema, [leaf]))
         .with_batch_size(batch_rows)
@@ -1384,7 +1451,7 @@ mod tests {
             from: "2026-09-20".into(),
             to: "2026-09-22".into(),
             symbols: vec![],
-            out: out.to_path_buf(),
+            out: out.display().to_string(),
             threads: Some(4),
             decode_threads: None,
             symbol_from_path: false,
@@ -1786,7 +1853,7 @@ mod tests {
         for (b, v) in builders.iter_mut().zip(&values) {
             v.iter().for_each(|x| b.push(x));
         }
-        write_parquet(&path, &cols, &mut builders, &[]).unwrap();
+        write_parquet(File::create(&path).unwrap(), &cols, &mut builders, &[]).unwrap();
         let r = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
         let b = r.build().unwrap().next().unwrap().unwrap();
         use arrow_schema::{DataType as D, TimeUnit};
@@ -1986,5 +2053,113 @@ mod tests {
     fn json_strings_are_escaped() {
         assert_eq!(json_str(" a"), "\" a\"");
         assert_eq!(json_str("a\"b\\c\nd\te\r\u{1}"), "\"a\\\"b\\\\c\\nd\\te\\r\\u0001\"");
+    }
+
+    /// Every file under `dir`, put in `lake` under `to` (`s3://b/in`) at its path from `dir`.
+    fn put_all(lake: &Files, dir: &Path, to: &str) {
+        let mut all = vec![];
+        brrrrr_lake::files::walk_parquet(dir, &mut all);
+        for f in all {
+            let mut w = lake.create(&within(to, &f.strip_prefix(dir).unwrap().display().to_string())).unwrap();
+            w.write_all(&std::fs::read(&f).unwrap()).unwrap();
+            w.close().unwrap();
+        }
+    }
+
+    /// Every file a run wrote under `out` (its path from there, its bytes); a manifest's run
+    /// times left out.
+    fn outputs(lake: &Files, out: &str) -> Vec<(String, Vec<u8>)> {
+        let mut got: Vec<(String, Vec<u8>)> = (lake.names(out, false).unwrap().into_iter())
+            .map(|(n, _)| (n.strip_prefix(out).unwrap().trim_start_matches('/').to_string(), lake.bytes(&n).unwrap()))
+            .collect();
+        got.sort();
+        for (name, bytes) in &mut got {
+            if name == "_SUCCESS" {
+                let mut m: J = serde_json::from_slice(bytes).unwrap();
+                m.as_object_mut().unwrap().retain(|k, _| k == "symbols");
+                for s in m["symbols"].as_array_mut().unwrap() {
+                    s.as_object_mut().unwrap().retain(|k, _| !k.ends_with("seconds"));
+                }
+                *bytes = m.to_string().into_bytes();
+            }
+        }
+        got
+    }
+
+    /// Sources in an object store, read by ranges, and the output written to one: the files
+    /// the same run over the same files on disk writes, byte for byte, symbols found by listing.
+    #[test]
+    fn a_store_s_files_in_and_out_are_what_files_on_disk_give() {
+        in_and_out_of(Arc::new(object_store::memory::InMemory::new()), "s3://b", "memory");
+    }
+
+    /// The same, on an S3 server (CI runs adobe/s3mock): its listing, ranged reads and uploads
+    /// in parts over HTTP.
+    #[test]
+    #[ignore = "needs an S3 endpoint in BRRRRR_IT_S3"]
+    fn a_store_s_files_in_and_out_are_what_files_on_disk_give_against_s3() {
+        let endpoint = std::env::var("BRRRRR_IT_S3").expect("BRRRRR_IT_S3: an S3 endpoint with a bucket `checkpoints`");
+        let store = object_store::aws::AmazonS3Builder::new()
+            .with_endpoint(endpoint)
+            .with_allow_http(true)
+            .with_bucket_name("checkpoints")
+            .with_access_key_id("k")
+            .with_secret_access_key("s")
+            .with_region("us-east-1")
+            .build()
+            .unwrap();
+        in_and_out_of(Arc::new(store), &format!("s3://checkpoints/historical-{}", std::process::id()), "s3");
+    }
+
+    /// Each fixture pipeline over files on disk, then over the same files in `store` under
+    /// `root` (`s3://bucket/prefix`), writing there: the same files.
+    fn in_and_out_of(store: Arc<dyn object_store::ObjectStore>, root: &str, name: &str) {
+        let bucket = root.splitn(4, '/').take(3).collect::<Vec<_>>().join("/");
+        for (sql, format) in
+            [("fixtures/pipelines/flow.sql", Format::Jsonl), ("fixtures/pipelines/bars.sql", Format::Parquet)]
+        {
+            let dir = scratch(&format!("store-{name}-{format:?}"));
+            let (_, sources, _) = files(sql, &dir.join("in"), 777);
+            let lake = Files::with_cap(dir.join("cache"), 1 << 30);
+            lake.insert_store(&bucket, store.clone());
+            let mut a = args(sql, &sources, &dir.join("out"));
+            a.format = format;
+            run_on(&lake, a).unwrap();
+            let (input, out) = (format!("{root}/{format:?}/in"), format!("{root}/{format:?}/out"));
+            put_all(&lake, &dir.join("in"), &input);
+            let in_store: Vec<String> =
+                sources.iter().map(|s| s.replace(&dir.join("in").display().to_string(), &input)).collect();
+            let mut a = args(sql, &in_store, &dir);
+            (a.out, a.format) = (format!("{out}/"), format);
+            run_on(&lake, a).unwrap();
+            let want = outputs(&lake, &dir.join("out").display().to_string());
+            assert!(want.len() > 3, "{:?}", want.iter().map(|w| &w.0).collect::<Vec<_>>());
+            assert_eq!(outputs(&lake, &out), want, "{sql}");
+            // read by ranges: kept in the cache by range, not whole
+            let ranges = std::fs::read_dir(dir.join("cache"))
+                .unwrap()
+                .flatten()
+                .flat_map(|e| std::fs::read_dir(e.path()).into_iter().flatten().flatten())
+                .filter(|e| e.file_name().to_string_lossy().starts_with(".range-"))
+                .count();
+            assert!(ranges > 0, "no range cached");
+            // an output with files there is refused, not added to
+            let mut a = args(sql, &in_store, &dir);
+            a.out = out.clone();
+            let e = format!("{:#}", run_on(&lake, a).unwrap_err());
+            assert!(e.contains(&format!("{out}: the output must not hold files")), "{e}");
+            // a file that is not Parquet: said, with its URL
+            let first = lake.names(&input, true).unwrap().remove(0).0;
+            let mut w = lake.create(&first).unwrap();
+            w.write_all(b"not Parquet").unwrap();
+            w.close().unwrap();
+            let fresh = Files::with_cap(dir.join("cache-2"), 0);
+            fresh.insert_store(&bucket, store.clone());
+            let mut a = args(sql, &in_store, &dir);
+            a.out = format!("{root}/{format:?}/again");
+            let e = format!("{:#}", run_on(&fresh, a).unwrap_err());
+            assert!(e.contains(&format!("{first}: not a Parquet file")), "{e}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

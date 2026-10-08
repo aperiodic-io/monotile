@@ -802,3 +802,52 @@ fn parquet_is_written_a_row_group_at_a_time_in_order() {
     }
     assert_eq!(next, n as i64);
 }
+
+/// `s3://b` as an in-memory store.
+fn in_store(l: &Lake) -> std::sync::Arc<object_store::memory::InMemory> {
+    let store = std::sync::Arc::new(object_store::memory::InMemory::new());
+    l.files.insert_store("s3://b", store.clone());
+    store
+}
+
+#[test]
+fn a_store_s_parquet_is_read_by_ranges_and_results_are_written_to_it_as_they_come() {
+    let d = tempfile::tempdir().unwrap();
+    let csv = d.path().join("t.csv").display().to_string();
+    std::fs::write(&csv, TRADES).unwrap();
+    let mut l = lake(d.path());
+    let store = in_store(&l);
+    let all = q(&mut l, &format!("SELECT * FROM '{csv}' ORDER BY ts"));
+    for f in ["t.parquet", "t.csv", "t.json"] {
+        let msg = l.execute(&format!("COPY (FROM '{csv}') TO 's3://b/out/{f}'")).unwrap();
+        assert_eq!(msg.message.unwrap(), format!("6 rows written to s3://b/out/{f}"));
+        assert_eq!(q(&mut l, &format!("FROM 's3://b/out/{f}' ORDER BY ts")), all, "{f}");
+    }
+    // Parquet, however small, by ranges; the others downloaded
+    for (f, ranged) in [("t.parquet", true), ("t.csv", false)] {
+        let mut files = l.files.list(&format!("s3://b/out/{f}"), None).unwrap();
+        l.files.fetch(&mut files).unwrap();
+        assert_eq!(files[0].ranged.is_some(), ranged, "{f}");
+    }
+    // Hive partitions, each file straight to its key
+    l.execute(&format!("COPY (SELECT symbol, price, size FROM '{csv}') TO 's3://b/parts' (PARTITION_BY (symbol))"))
+        .unwrap();
+    let keys: Vec<String> = l.files.names("s3://b/parts", false).unwrap().into_iter().map(|(k, _)| k).collect();
+    assert_eq!(keys, ["s3://b/parts/symbol=A/data_0.parquet", "s3://b/parts/symbol=B/data_0.parquet"]);
+    let sums = "SELECT symbol, count(*), sum(price * size) FROM";
+    assert_eq!(
+        q(&mut l, &format!("{sums} 's3://b/parts/' GROUP BY symbol ORDER BY symbol")),
+        q(&mut l, &format!("{sums} '{csv}' GROUP BY symbol ORDER BY symbol"))
+    );
+    // a result of several parts' bytes: uploaded in parts, there whole
+    let big = d.path().join("big.csv").display().to_string();
+    let rows: String =
+        (0..1_000_000u64).map(|i| format!("{i},{}\n", i.wrapping_mul(2_654_435_761) % 1_000_003)).collect();
+    std::fs::write(&big, format!("i,x\n{rows}")).unwrap();
+    l.execute(&format!("COPY (FROM '{big}') TO 's3://b/big.csv'")).unwrap();
+    let size = l.files.list("s3://b/big.csv", None).unwrap()[0].object.as_ref().unwrap().size;
+    assert!(size > 10 << 20, "{size} bytes: more than two parts'");
+    let mut sum = |from: &str| q(&mut l, &format!("SELECT count(*), sum(x), max(i) FROM '{from}'"));
+    assert_eq!(sum("s3://b/big.csv"), sum(&big));
+    drop(store);
+}

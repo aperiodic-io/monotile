@@ -1,7 +1,8 @@
 Feature: Object stores, read and written natively
   s3://, gs://, az:// and https:// locations read and write like paths: a file, a glob, a
   directory of Hive partitions. Credentials come from the environment, as each cloud's own
-  tools take them. Remote files are cached, and fetched again when they change.
+  tools take them. A store's Parquet files are read by the byte ranges a query needs, results
+  written to a store as they come; what is read is cached, and fetched again when it changes.
 
   Background:
     Given a file "trades.csv" with:
@@ -132,6 +133,80 @@ Feature: Object stores, read and written natively
       | csv     |
       | json    |
 
+  Scenario: S3: a result of several parts' bytes is uploaded as it is written, in parts
+    A result is not written to a local file first: up to 5 MiB it is uploaded in one request,
+    past it in parts of 5 MiB (here three), and the object is there once the last is.
+    Given S3 credentials
+    And an S3 bucket
+    And a CSV file "many.csv" of 400000 trades
+    When I run brrrrr sql:
+      """
+      COPY (FROM 'many.csv') TO 's3://{bucket}/many/trades.csv'
+      """
+    Then it says "400000 rows written to s3://{bucket}/many/trades.csv"
+    When I run brrrrr sql:
+      """
+      SELECT count(*) AS n, count(DISTINCT symbol) AS symbols, sum(price) AS total FROM 's3://{bucket}/many/trades.csv'
+      """
+    Then the output is:
+      """
+      n,symbols,total
+      400000,97,242340735
+      """
+
+  Scenario: Azure: a result of several parts' bytes is uploaded as it is written, in blocks
+    Given an Azure container
+    And a CSV file "many.csv" of 400000 trades
+    When I run brrrrr sql:
+      """
+      COPY (FROM 'many.csv') TO 'az://{bucket}/many/trades.csv'
+      """
+    Then it says "400000 rows written to az://{bucket}/many/trades.csv"
+    When I run brrrrr sql:
+      """
+      SELECT count(*) AS n, count(DISTINCT symbol) AS symbols, sum(price) AS total FROM 'az://{bucket}/many/trades.csv'
+      """
+    Then the output is:
+      """
+      n,symbols,total
+      400000,97,242340735
+      """
+
+  Scenario: S3: the shell's -o writes its result to a store
+    Given S3 credentials
+    And an S3 bucket
+    When I run "brrrrr sql -o s3://{bucket}/answers/volume.parquet" on:
+      """
+      SELECT symbol, sum(size) AS volume FROM 'trades.csv' GROUP BY symbol ORDER BY symbol
+      """
+    Then it says "2 rows written to s3://{bucket}/answers/volume.parquet"
+    When I run brrrrr sql:
+      """
+      SELECT * FROM 's3://{bucket}/answers/volume.parquet' ORDER BY symbol
+      """
+    Then the output is:
+      """
+      symbol,volume
+      BTC,0.75
+      ETH,2
+      """
+
+  Scenario: S3: a write refused by the store fails, and leaves nothing there
+    Given S3 credentials
+    And an S3 bucket
+    And the S3 secret is "wrong"
+    When I run brrrrr sql:
+      """
+      COPY (FROM 'trades.csv') TO 's3://{bucket}/refused/trades.parquet'
+      """
+    Then it fails with "writing s3://{bucket}/refused/trades.parquet"
+    Given the S3 secret is "brrrrr-secret-key"
+    When I run brrrrr sql:
+      """
+      SELECT count(*) AS n FROM 's3://{bucket}/refused/'
+      """
+    Then it fails with "no files at s3://{bucket}/refused/"
+
   Scenario: S3: a changed object is read anew, not from the cache
     Given S3 credentials
     And an S3 bucket
@@ -203,6 +278,22 @@ Feature: Object stores, read and written natively
       """
       symbol,n
       BTC,4
+      ETH,2
+      """
+
+  Scenario: GCS: Parquet read by the byte ranges a query needs
+    (Writes to GCS are not checked here: the emulator does not take the XML API's uploads.)
+    Given a GCS bucket
+    And "trades.csv" written as "trades.parquet"
+    And the file "trades.parquet" in GCS at "pq/trades.parquet"
+    When I run brrrrr sql:
+      """
+      SELECT symbol, sum(size) AS volume FROM 'gs://{bucket}/pq/trades.parquet' GROUP BY symbol ORDER BY symbol
+      """
+    Then the output is:
+      """
+      symbol,volume
+      BTC,0.75
       ETH,2
       """
 
@@ -330,14 +421,12 @@ Feature: Object stores, read and written natively
       """
     Then it fails with "no files at s3://{bucket}/raw/trade.csv: did you mean s3://{bucket}/raw/trades.csv?"
 
-  Scenario: S3: a large Parquet file is read by the byte ranges a query needs
-    Its footer, then the column chunks of the columns read (a file of 16 MiB or more; here every
-    one, to read a small one so), not the whole file: the same answer.
+  Scenario: S3: a Parquet file is read by the byte ranges a query needs
+    Its footer, then the column chunks of the columns read, not the whole file: the same answer.
     Given S3 credentials
     And an S3 bucket
     And "trades.csv" written as "trades.parquet"
     And the file "trades.parquet" in S3 at "big/trades.parquet"
-    And the environment variable BRRRRR_RANGED_FROM is "0"
     When I run brrrrr sql:
       """
       SELECT symbol, count(*) AS n, sum(size) AS volume FROM 's3://{bucket}/big/trades.parquet' GROUP BY symbol ORDER BY symbol

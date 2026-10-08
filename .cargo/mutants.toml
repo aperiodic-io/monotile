@@ -45,11 +45,11 @@ exclude_re = [
   "crates/brrrrr/src/iggy\\.rs:.*(Reader::(start|poll|end|count|quiet_at|failures)|<impl Drop for Reader>::drop|sdk::(metadata|consume))( |$)",
   # The historical runtime's scheduling sets its speed and memory, never its output (the tests run
   # every pipeline on two pools, with and without decode threads, decoded inline and on threads):
-  # the order symbols start in (largest first) and the decode threads each gets (`run`), how many
+  # the order symbols start in (largest first) and the decode threads each gets (`run_on`), how many
   # parts the pool cuts a batch in, the buffer before a part file, which sources decode on the
   # reader's thread (INLINE_ROWS), how far decoding runs ahead, and a decoding thread going on
   # after it sent its error (the reader stops at the error).
-  "crates/brrrrr/src/historical\\.rs:.*replace (\\+= with \\*=|/ with (%|\\*)) in run$",
+  "crates/brrrrr/src/historical\\.rs:.*replace (\\+= with \\*=|/ with (%|\\*)) in run_on$",
   "crates/brrrrr/src/historical\\.rs:.*<impl Pool for Rayon<'_>>::threads",
   "crates/brrrrr/src/historical\\.rs:.*replace << with >>( in Lines::new)?$",
   "crates/brrrrr/src/historical\\.rs:.*replace (<= with >|> with (==|<|>=)|\\+ with (-|\\*)|\\|\\| with &&) in Parquet::open$",

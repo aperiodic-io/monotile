@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use brrrrr_lake::write::{self, Out};
 use brrrrr_lake::{Answer, Lake};
 use std::cell::RefCell;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -119,14 +119,10 @@ pub fn run(a: Args) -> Result<()> {
                     Some(_) => format,
                     None => Out::of_path(path).unwrap_or(Out::Parquet),
                 };
-                let tmp = std::env::temp_dir().join(format!(".brrrrr-out-{}", std::process::id()));
-                let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+                let message = |e: anyhow::Error| anyhow::anyhow!(brrrrr_lake::message(&e));
+                let mut f = std::io::BufWriter::new(lake.files.create(path).map_err(message)?);
                 write::write(&mut f, out, &answer.columns, &answer.rows, usize::MAX)?;
-                f.flush()?;
-                drop(f);
-                let r = lake.files.upload(&tmp, path).map_err(|e| anyhow::anyhow!(brrrrr_lake::message(&e)));
-                let _ = std::fs::remove_file(&tmp);
-                r?;
+                f.into_inner().map_err(|e| e.into_error())?.close().map_err(message)?;
                 eprintln!("{} rows written to {path}", answer.rows.len());
             }
             _ => show(&answer, format, a.max_rows)?,
@@ -604,6 +600,17 @@ mod tests {
         let (start, got) = candidates(line, "SELECT t.si".len(), &tables, &columns, &|_| vec![]);
         assert_eq!((start, got), ("SELECT t.".len(), vec!["size".to_string(), "sign(".into()]), "a qualified column");
         assert_eq!(complete("SELECT b FROM 'data/q.csv' WHERE b"), ["bid", "between"]);
+    }
+
+    #[test]
+    fn o_writes_the_last_result_to_its_file_whole() {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("out/answer.csv");
+        let sql = "SELECT 1 AS x; SELECT 2 AS y UNION ALL SELECT 3".to_string();
+        let a = super::Args { sql: Some(sql), output: Some(out.display().to_string()), ..Default::default() };
+        super::run(a).unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "y\n2\n3\n");
+        assert_eq!(std::fs::read_dir(d.path().join("out")).unwrap().count(), 1, "no file of its own left");
     }
 
     #[test]

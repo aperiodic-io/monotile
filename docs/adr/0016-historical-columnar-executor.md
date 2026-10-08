@@ -53,6 +53,11 @@ engine's for the same rows, as JSON lines.
   order). `engine::Pool` is the runtime's (rayon); core has no threads (ADR-0012). The output
   does not depend on the pool, the batches or the chunks: tests run every pipeline on two pools
   and chunks of 5 to 65,536 rows.
+- **Files on disk or in an object store.** A `--source` path and `--out` may be a store's URL
+  (`s3://`, `gs://`, `az://`). A store's source files are found by listing each directory once,
+  and each column of a row group is fetched as its byte range (`brrrrr_lake::ranged`), not the
+  file. The output is uploaded as it is written (`brrrrr_lake::files::Writer`): a file is there
+  whole or not at all, and `_SUCCESS`, written last, says every symbol's is.
 - **Parquet decoded once per column.** Only the columns the views read (a projection's items no
   reader reads are not computed, nor their inputs decoded), each on threads of its own a row
   group ahead (more threads per column as fewer symbols are left), a source of few rows on the

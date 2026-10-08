@@ -8,8 +8,11 @@ series, live and historical.
 **Query files where they are.** `brrrrr sql` and `pip install brrrrr` query Parquet, CSV
 (gzipped, kdb+ and epoch times) and JSON lines, globs, Hive-partitioned directories, Iceberg and
 Delta tables, on disk and in S3, GCS, Azure and over HTTP. A `WHERE` on partitions skips what it
-excludes before anything is downloaded. Results print as tables, or go to CSV, JSON, Parquet,
-partitioned directories, and Polars, pandas and pyarrow.
+excludes before anything is fetched. A store's Parquet files are read by the byte ranges a
+query needs, not downloaded, and results are uploaded to a store as they are written, never
+through a local file. Results print as tables, or go to CSV, JSON, Parquet, partitioned
+directories, and Polars, pandas and pyarrow. `brrrrr historical` (cargo feature `historical`)
+reads a pipeline's Parquet sources from a store and writes its output to one the same way.
 
 **The time-series vocabulary.** `time_bucket` in any time zone, `first`/`last`, `vwap`, `twap`,
 as-of joins (strict, with a tolerance, at an offset for markouts), window joins, gap filling
