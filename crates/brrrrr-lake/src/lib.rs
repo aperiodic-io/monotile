@@ -9,7 +9,7 @@ pub mod read;
 pub mod tables;
 pub mod write;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use brrrrr_core::column::Batch;
 use brrrrr_core::engine::{Pool, Row, Serial, Task};
 use brrrrr_core::query::{self, Table};
@@ -764,49 +764,22 @@ const OPEN_PARTITIONS: usize = 100;
 /// Rows held at most by a partitioned COPY's open files for their next row groups.
 const HELD: usize = 1 << 21;
 
-/// A file of a COPY being written: beside it, moved into place when it is done (a store's: in
-/// a local file, uploaded). Dropped unclosed, its partial file is removed.
+/// A file of a COPY being written, to its place as it is (`files::Writer`).
 struct Output {
-    writer: Option<write::ResultWriter<std::io::BufWriter<std::fs::File>>>,
-    tmp: std::path::PathBuf,
-    dest: String,
+    writer: Option<write::ResultWriter<std::io::BufWriter<files::Writer>>>,
 }
 
 impl Output {
-    fn create(dest: &str, format: write::Out, columns: &[String]) -> Result<Output> {
-        let tmp = match local_path(dest) {
-            Some(to) => {
-                let dir = to.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
-                std::fs::create_dir_all(dir).with_context(|| dir.display().to_string())?;
-                tempfile_path(dir, dest)
-            }
-            None => tempfile_path(&std::env::temp_dir(), dest),
-        };
-        let f = std::fs::File::create(&tmp).with_context(|| tmp.display().to_string())?;
-        let writer = write::ResultWriter::new(std::io::BufWriter::new(f), format, columns, None)?;
-        Ok(Output { writer: Some(writer), tmp, dest: dest.to_string() })
+    fn create(files: &Files, dest: &str, format: write::Out, columns: &[String]) -> Result<Output> {
+        let out = std::io::BufWriter::with_capacity(1 << 20, files.create(dest)?);
+        Ok(Output { writer: Some(write::ResultWriter::new(out, format, columns, None)?) })
     }
 
-    /// The file written whole, and moved or uploaded to its place.
-    fn close(mut self, files: &Files) -> Result<()> {
+    /// The file written whole, and in its place.
+    fn close(mut self) -> Result<()> {
         let f = self.writer.take().expect("writer").finish()?;
-        f.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-        match local_path(&self.dest) {
-            Some(to) => std::fs::rename(&self.tmp, &to).with_context(|| to.display().to_string()),
-            None => files.upload(&self.tmp, &self.dest),
-        }
+        f.into_inner().map_err(|e| e.into_error())?.close()
     }
-}
-
-impl Drop for Output {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.tmp);
-    }
-}
-
-/// A local destination's path (`file://` or none); `None` for a store's.
-fn local_path(dest: &str) -> Option<std::path::PathBuf> {
-    (!files::is_url(dest) || dest.starts_with("file://")).then(|| dest.strip_prefix("file://").unwrap_or(dest).into())
 }
 
 /// Files closed at most at a time, each on a thread of its own: their last row groups encoded,
@@ -855,7 +828,7 @@ impl<'a, 's> Copy<'a, 's> {
             let columns: Vec<String> = kept.iter().map(|&i| columns[i].clone()).collect();
             let mut open = vec![];
             if keys.is_empty() {
-                open.push((String::new(), Output::create(&self.dest, self.format, &columns)?));
+                open.push((String::new(), Output::create(&self.lake.files, &self.dest, self.format, &columns)?));
             }
             self.parts = Some(Parts { keys, kept, columns, open, files: HashMap::new() });
         }
@@ -906,7 +879,7 @@ impl<'a, 's> Copy<'a, 's> {
                 None => {
                     if p.open.len() >= OPEN_PARTITIONS {
                         let (_, oldest) = p.open.remove(0);
-                        close(&mut self.closing, self.scope, &self.lake.files, oldest)?;
+                        close(&mut self.closing, self.scope, oldest)?;
                     }
                     let n = p.files.entry(dir.clone()).or_insert(0);
                     if *n == 0 {
@@ -924,7 +897,12 @@ impl<'a, 's> Copy<'a, 's> {
                     } else {
                         dir.clone()
                     };
-                    let out = Output::create(&format!("{root}/{d}/data_{n}.{ext}"), self.format, &p.columns)?;
+                    let out = Output::create(
+                        &self.lake.files,
+                        &format!("{root}/{d}/data_{n}.{ext}"),
+                        self.format,
+                        &p.columns,
+                    )?;
                     *n += 1;
                     p.open.push((dir, out));
                     p.open.len() - 1
@@ -951,7 +929,7 @@ impl<'a, 's> Copy<'a, 's> {
             self.push(columns, &Batch::new(0, vec![]))?;
         }
         for (_, out) in self.parts.take().expect("parts").open {
-            close(&mut self.closing, self.scope, &self.lake.files, out)?;
+            close(&mut self.closing, self.scope, out)?;
         }
         self.closing.drain(..).try_for_each(join)?;
         Ok((self.rows, self.partitions))
@@ -994,16 +972,11 @@ fn ids(c: &brrrrr_core::column::Col) -> Vec<u64> {
 type Closing<'s> = std::collections::VecDeque<std::thread::ScopedJoinHandle<'s, Result<()>>>;
 
 /// `out` closed on a thread of its own, once fewer than `CLOSING` are.
-fn close<'a, 's>(
-    closing: &mut Closing<'s>,
-    scope: &'s std::thread::Scope<'s, 'a>,
-    files: &'a Files,
-    out: Output,
-) -> Result<()> {
+fn close<'a, 's>(closing: &mut Closing<'s>, scope: &'s std::thread::Scope<'s, 'a>, out: Output) -> Result<()> {
     if closing.len() >= CLOSING {
         closing.pop_front().map_or(Ok(()), join)?;
     }
-    closing.push_back(scope.spawn(move || out.close(files)));
+    closing.push_back(scope.spawn(move || out.close()));
     Ok(())
 }
 
@@ -1492,15 +1465,6 @@ pub fn message(e: &anyhow::Error) -> String {
         Some(h) => format!("{out}\n  hint: {h}"),
         None => out,
     }
-}
-
-/// A file of its own in `dir` to write `dest` in first (one per file, however many run at once),
-/// hidden.
-fn tempfile_path(dir: &std::path::Path, dest: &str) -> std::path::PathBuf {
-    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let base = dest.rsplit('/').next().unwrap_or("out");
-    dir.join(format!(".brrrrr-{}-{n}-{base}", std::process::id()))
 }
 
 /// A type as `DESCRIBE` shows it.

@@ -1,6 +1,7 @@
 //! Where a table's files are: a path, a glob, a directory, or a URL of an object store
-//! (`s3://`, `gs://`, `az://`/`abfss://`, `http(s)://`). Remote files are downloaded once into a
-//! cache (re-fetched when the object changes) and read as local ones; results are uploaded.
+//! (`s3://`, `gs://`, `az://`/`abfss://`, `http(s)://`). A store's Parquet files are read by the
+//! byte ranges a query needs, other remote files downloaded; both are kept in a cache (fetched
+//! again when the object changes). Results are written to a store as they come (`Writer`).
 //!
 //! Object stores take their settings from the environment, as each cloud's own tools do:
 //! - S3 and compatible stores (MinIO and the like): `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
@@ -21,8 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use url::Url;
 
-/// Results up to this size are uploaded in one request; larger ones in parts.
-const SINGLE_PUT: u64 = 64 << 20;
+/// What a result is uploaded in: one request up to this size, else parts of it (S3's least).
+const PART: usize = 5 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
@@ -79,7 +80,7 @@ pub struct Files {
     /// The cache's size at most (bytes), the least recently used files evicted past it; 0: no
     /// cache (`cache_size`).
     cap: u64,
-    /// Remote Parquet files of this size or more are read by ranges (`RANGED_FROM`).
+    /// Parquet files over HTTP(S) of this size or more are read by ranges (`RANGED_FROM`).
     ranged_from: u64,
     /// Without a cache, the temporary copies read now, by object and version: a query that
     /// fetches a file twice (its columns, then its rows) downloads it once.
@@ -87,12 +88,14 @@ pub struct Files {
     /// The remote Parquet files read by ranges now, by object and version: their footer read once.
     ranged: Mutex<HashMap<String, std::sync::Weak<crate::ranged::Ranged>>>,
     stores: Mutex<HashMap<String, Arc<dyn ObjectStore>>>,
-    rt: tokio::runtime::Runtime,
+    /// Shared with the files being written (`Writer`), which may outlive this.
+    rt: Arc<tokio::runtime::Runtime>,
 }
 
-/// Remote Parquet files of this size or more are read by ranges (`ranged`), smaller ones
-/// downloaded whole: one request then costs less than the several ranges would save.
-/// `BRRRRR_RANGED_FROM` sets another (bytes; 0: every one by ranges).
+/// Parquet files over HTTP(S) of this size or more are read by ranges (`ranged`), smaller ones
+/// downloaded whole: a web server may not answer ranges, and one request then costs less than
+/// the several ranges would save. A store's are all read by ranges. `BRRRRR_RANGED_FROM` sets
+/// another (bytes; 0: every one by ranges).
 pub const RANGED_FROM: u64 = 16 << 20;
 
 /// The cache's size by default: a few weeks of a market's files, and a small part of a disk.
@@ -270,7 +273,7 @@ impl Files {
             temps: Mutex::default(),
             ranged: Mutex::default(),
             stores: Mutex::new(HashMap::new()),
-            rt,
+            rt: Arc::new(rt),
         }
     }
 
@@ -335,6 +338,12 @@ impl Files {
             files.truncate(1);
         }
         Ok(files)
+    }
+
+    /// `store` for the bucket of `url` (`s3://bucket`), not one from the environment: an
+    /// in-memory store in tests.
+    pub fn insert_store(&self, url: &str, store: Arc<dyn ObjectStore>) {
+        self.stores.lock().expect("stores").insert(url.trim_end_matches('/').to_string(), store);
     }
 
     /// The store of a URL's bucket, built once from the environment.
@@ -458,13 +467,16 @@ impl Files {
         Ok(files)
     }
 
-    /// Copies the remote files into the cache (those not there yet), to be read as local ones.
+    /// Makes the remote files readable: a store's Parquet file by ranges (its footer read), any
+    /// other copied into the cache (unless it is there), to be read as a local one.
     pub fn fetch(&self, files: &mut [File]) -> Result<()> {
         for f in files {
             if let Some(m) = f.object.take() {
-                let store = self.store(&Url::parse(&f.name)?)?;
-                // a large Parquet file: by ranges, what a query reads of it alone
-                if f.format == Format::Parquet && m.size >= self.ranged_from {
+                let url = Url::parse(&f.name)?;
+                let store = self.store(&url)?;
+                // by ranges, what a query reads of it alone
+                let from = if url.scheme().starts_with("http") { self.ranged_from } else { 0 };
+                if f.format == Format::Parquet && m.size >= from {
                     f.ranged = Some(self.ranged(&store, &m, &f.name)?);
                     continue;
                 }
@@ -749,42 +761,143 @@ impl Files {
         Ok(any(p))
     }
 
-    /// Writes `local` to `url` (an object store's or a file's).
-    pub fn upload(&self, local: &Path, to: &str) -> Result<()> {
+    /// A file written at `to` (a path or a store's URL) as its bytes come: see `Writer`.
+    pub fn create(&self, to: &str) -> Result<Writer> {
         if !is_url(to) || to.starts_with("file://") {
-            let to = Path::new(to.strip_prefix("file://").unwrap_or(to));
-            if let Some(dir) = to.parent().filter(|d| !d.as_os_str().is_empty()) {
-                std::fs::create_dir_all(dir)?;
-            }
-            std::fs::copy(local, to).with_context(|| to.display().to_string())?;
-            return Ok(());
+            let to = PathBuf::from(to.strip_prefix("file://").unwrap_or(to));
+            let dir = to.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+            std::fs::create_dir_all(dir).with_context(|| dir.display().to_string())?;
+            static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let base = to.file_name().map_or("out".into(), |b| b.to_string_lossy());
+            let tmp = dir.join(format!(".brrrrr-{}-{n}-{base}", std::process::id()));
+            let file = std::fs::File::create(&tmp).with_context(|| tmp.display().to_string())?;
+            return Ok(Writer::Local { file: Some(file), tmp, to });
         }
-        let url = Url::parse(to)?;
+        let url = Url::parse(to).with_context(|| format!("{to}: not a URL"))?;
         let store = self.store(&url)?;
         let path = key(&urlencoding_decode(url.path().trim_start_matches('/')));
-        let size = std::fs::metadata(local)?.len();
-        self.rt
-            .block_on(async {
-                use std::io::Read;
-                // one request up to 64 MiB (every store and emulator takes it); in parts past it
-                if size <= SINGLE_PUT {
-                    store.put(&path, std::fs::read(local)?.into()).await?;
-                    return Ok(());
-                }
-                let mut w = WriteMultipart::new(store.put_multipart(&path).await?);
-                let mut f = std::fs::File::open(local)?;
-                let mut buf = vec![0; 8 << 20];
-                loop {
-                    let n = f.read(&mut buf)?;
-                    if n == 0 {
-                        break;
+        let rt = self.rt.clone();
+        Ok(Writer::Store { name: to.to_string(), store, path, rt, buf: vec![], parts: None })
+    }
+}
+
+/// A file being written to its place as its bytes come (`Files::create`), there whole once
+/// `close` returns and never in part:
+/// - a local file is written beside it, hidden, and moved into place;
+/// - a store's object is uploaded as it is written, in one request if it is at most `PART`
+///   bytes, else in parts of `PART` (one sent while the next is written), which become the
+///   object when the upload is completed.
+///
+/// Dropped unclosed, the hidden file is removed, the upload aborted.
+pub enum Writer {
+    Local {
+        /// None once its bytes are all written.
+        file: Option<std::fs::File>,
+        tmp: PathBuf,
+        to: PathBuf,
+    },
+    Store {
+        name: String,
+        store: Arc<dyn ObjectStore>,
+        path: ObjPath,
+        rt: Arc<tokio::runtime::Runtime>,
+        /// The bytes until there are more than a part's.
+        buf: Vec<u8>,
+        /// The upload in parts, once there are.
+        parts: Option<WriteMultipart>,
+    },
+}
+
+impl Writer {
+    /// Its bytes all written. A store's object is in place. A local file is still hidden: its
+    /// hidden path and its own are returned, to be synced and moved into place (`close`), by a
+    /// caller of many files several at a time.
+    pub fn finish(mut self) -> Result<Option<(PathBuf, PathBuf)>> {
+        match &mut self {
+            Writer::Local { file, tmp, to } => {
+                drop(file.take());
+                Ok(Some((tmp.clone(), to.clone())))
+            }
+            Writer::Store { name, store, path, rt, buf, parts } => {
+                let r = match parts.take() {
+                    None => rt.block_on(store.put(path, std::mem::take(buf).into())).map(drop),
+                    Some(mut w) => rt
+                        .block_on(async {
+                            w.write(buf);
+                            w.finish().await
+                        })
+                        .map(drop),
+                };
+                r.with_context(|| format!("writing {name}"))?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Its bytes all written, and on disk under its name (a local file's), or in the store.
+    pub fn close(self) -> Result<()> {
+        if let Some((tmp, to)) = self.finish()? {
+            std::fs::File::open(&tmp).and_then(|f| f.sync_all()).with_context(|| tmp.display().to_string())?;
+            std::fs::rename(&tmp, &to).with_context(|| to.display().to_string())?;
+        }
+        Ok(())
+    }
+}
+
+impl std::io::Write for Writer {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Writer::Local { file, .. } => file.as_mut().expect("not finished").write(b),
+            Writer::Store { store, path, rt, buf, parts, .. } => {
+                let w = match parts {
+                    Some(w) => w,
+                    None if buf.len() + b.len() <= PART => {
+                        buf.extend_from_slice(b);
+                        return Ok(b.len());
                     }
-                    w.write(&buf[..n]);
+                    // past a part: in parts
+                    None => {
+                        let upload = rt.block_on(store.put_multipart(path)).map_err(std::io::Error::other)?;
+                        let w = parts.insert(WriteMultipart::new_with_chunk_size(upload, PART));
+                        let _in = rt.enter(); // a part's upload is a task of the runtime's
+                        w.write(&std::mem::take(buf));
+                        w
+                    }
+                };
+                let _in = rt.enter();
+                w.write(b);
+                // one part sent while the next is written: memory of two parts a file
+                rt.block_on(w.wait_for_capacity(1)).map_err(std::io::Error::other)?;
+                Ok(b.len())
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Writer::Local { file, .. } => file.as_mut().map_or(Ok(()), |f| f.flush()),
+            Writer::Store { .. } => Ok(()),
+        }
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        match self {
+            Writer::Local { file: Some(_), tmp, .. } => {
+                let _ = std::fs::remove_file(tmp);
+            }
+            Writer::Store { rt, parts, .. } => {
+                // its parts uploaded so far deleted (a store keeps them, and bills them, else)
+                if let Some(w) = parts.take() {
+                    if tokio::runtime::Handle::try_current().is_err() {
+                        let _ = rt.block_on(w.abort());
+                    }
                 }
-                w.finish().await?;
-                Ok::<_, anyhow::Error>(())
-            })
-            .with_context(|| format!("uploading to {to}"))
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1058,5 +1171,61 @@ mod tests {
         // a name close to one there
         let err = format!("{:#}", files.list(&format!("{url}/x/b.csv"), None).unwrap_err());
         assert!(err.contains("x/b.csv"), "{err}");
+    }
+
+    #[test]
+    fn a_file_written_is_in_its_place_whole_or_not_at_all() {
+        use std::io::Write;
+        let d = tempfile::tempdir().unwrap();
+        let files = Files::with_cap(d.path().join("cache"), 0);
+        // a local file: hidden beside its place until it is closed
+        let dir = d.path().join("out/sub");
+        let to = dir.join("r.csv");
+        let mut w = files.create(&to.display().to_string()).unwrap();
+        w.write_all(b"x\n1\n").unwrap();
+        let hidden = || {
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
+                .count()
+        };
+        assert!(!to.exists());
+        assert_eq!(hidden(), 1);
+        w.close().unwrap();
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "x\n1\n");
+        assert_eq!(hidden(), 0);
+        // dropped unclosed: nothing there
+        let mut w = files.create(&format!("file://{}", dir.join("gone.csv").display())).unwrap();
+        w.write_all(b"x").unwrap();
+        drop(w);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "r.csv alone");
+        // finished, not closed: its hidden path and its own, for the caller to move
+        let mut w = files.create(&dir.join("later.csv").display().to_string()).unwrap();
+        w.write_all(b"y").unwrap();
+        let (tmp, own) = w.finish().unwrap().unwrap();
+        assert_eq!(own, dir.join("later.csv"));
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"y");
+        assert!(!own.exists());
+        // a store's: uploaded as it is written, the object there once it is closed
+        let store = Arc::new(object_store::memory::InMemory::new());
+        files.insert_store("s3://b/", store.clone());
+        let get = |k: &str| files.rt.block_on(async { store.get(&ObjPath::from(k)).await?.bytes().await });
+        let bytes = |n: usize| (0..n).map(|i| (i % 251) as u8).collect::<Vec<u8>>();
+        for (k, n) in [("small", 10), ("one part", PART), ("parts", 3 * PART + 7)] {
+            let mut w = files.create(&format!("s3://b/k/{k}")).unwrap();
+            for c in bytes(n).chunks(1 << 20) {
+                w.write_all(c).unwrap();
+            }
+            assert!(get(&format!("k/{k}")).is_err(), "{k}: not there before it is closed");
+            w.close().unwrap();
+            assert_eq!(get(&format!("k/{k}")).unwrap(), bytes(n), "{k}");
+        }
+        // dropped in its parts: aborted, nothing there
+        let mut w = files.create("s3://b/k/dropped").unwrap();
+        w.write_all(&bytes(2 * PART + 1)).unwrap();
+        drop(w);
+        assert!(get("k/dropped").is_err());
+        assert_eq!(files.names("s3://b/k", false).unwrap().len(), 3);
     }
 }

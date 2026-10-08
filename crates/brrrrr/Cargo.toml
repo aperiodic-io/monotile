@@ -44,8 +44,8 @@ url = { version = "2", optional = true }
 # (Dockerfile: --no-default-features), as they were.
 default = ["sql"]
 sql = ["dep:brrrrr-lake", "dep:rustyline", "dep:pgwire", "dep:chrono", "dep:async-trait", "dep:futures", "dep:url", "dep:arrow-array", "dep:arrow-schema", "tokio/rt-multi-thread", "tokio/net", "tokio/macros"]
-# `brrrrr historical` (ADR-0016): the SQL over days of Parquet files
-historical = ["dep:parquet", "dep:arrow-array", "dep:arrow-schema", "dep:rayon"]
+# `brrrrr historical` (ADR-0016): the SQL over days of Parquet files, on disk or in a store
+historical = ["dep:brrrrr-lake", "dep:object_store", "dep:parquet", "dep:arrow-array", "dep:arrow-schema", "dep:rayon"]
 iggy = ["dep:iggy", "tokio/macros"]
 # Checkpoints in an object store (s3://, memory:///) besides a directory on the pod's volume.
 # Off by default: the default binary (and image) has no HTTP client or cloud SDK code; the

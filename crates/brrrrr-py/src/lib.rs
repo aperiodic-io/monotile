@@ -219,20 +219,12 @@ impl Result {
     /// .csv, .json).
     fn write(&self, path: &str) -> PyResult<()> {
         let format = Out::of_path(path).unwrap_or(Out::Parquet);
-        let tmp = std::env::temp_dir().join(format!(
-            ".brrrrr-py-{}-{}",
-            std::process::id(),
-            path.rsplit('/').next().unwrap_or("out")
-        ));
-        let r = (|| -> anyhow::Result<()> {
-            let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        (|| -> anyhow::Result<()> {
+            let mut f = std::io::BufWriter::new(brrrrr_lake::files::Files::default().create(path)?);
             write::write(&mut f, format, &self.columns, &self.rows, usize::MAX)?;
-            std::io::Write::flush(&mut f)?;
-            drop(f);
-            brrrrr_lake::files::Files::default().upload(&tmp, path)
-        })();
-        let _ = std::fs::remove_file(&tmp);
-        r.map_err(err)
+            f.into_inner().map_err(|e| e.into_error())?.close()
+        })()
+        .map_err(err)
     }
 
     /// The rows as a table to read (at most `max_rows`, the first and last halves).
