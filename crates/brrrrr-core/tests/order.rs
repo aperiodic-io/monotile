@@ -359,7 +359,9 @@ fn random(t: &Type, x: &mut u64, null: u64) -> Value {
         Type::F32 => Value::F32(float(r / 7) as f32),
         Type::F64 => Value::F64(float(r / 7)),
         Type::Str => Value::Str(["A", "B", "C", "1", "2", ""][(r % 6) as usize].into()),
-        Type::Time(_) => Value::Time(1_700_000_000_000_000 + (r % 600_000) as i64 * 1000),
+        // near the times the pipelines make of random integers (`-3` µs): a key's rows decades
+        // apart would have state.sql's one-second gap fill write every second between them
+        Type::Time(_) => Value::Time((r % 600_000) as i64 * 1000),
         Type::Array(e) => Value::Array((0..r % 3).map(|_| random(e, x, null)).collect()),
         _ => Value::Array(Arc::new([])),
     }
@@ -401,9 +403,12 @@ proptest! {
                         e.insert(&s.name, chunk.collect(), &mut out);
                     }
                 }
-                e.close_until(1_800_000_000_000_000, &mut out);
+                // an hour past the rows' last time (`random`) closes every window they opened; much
+                // further, and state.sql's one-second gap fill writes a row for every second between
+                e.close_until(600_000_000 + 3_600_000_000, &mut out);
             }));
             prop_assert!(ran.is_ok(), "{} panicked", path);
         }
     }
 }
+
