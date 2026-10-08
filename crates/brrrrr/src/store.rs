@@ -8,6 +8,8 @@
 //! the names, read one, create one that must not exist yet (the lease rests on that: two
 //! instances creating one epoch, exactly one succeeds) and delete one.
 use anyhow::{bail, Context, Result};
+#[cfg(feature = "object-store")]
+use object_store::ObjectStoreExt;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -275,7 +277,7 @@ impl Remote {
         at: String,
         min: Duration,
     ) -> Result<Remote> {
-        let prefix = parts.iter().fold(prefix, |p, part| p.child(*part));
+        let prefix = parts.iter().fold(prefix, |p, part| p.join(*part));
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()?;
         Ok(Remote { store, at: format!("{at}/{prefix}"), prefix, rt, min })
     }
@@ -307,7 +309,7 @@ impl Store for Remote {
     }
 
     fn get(&self, name: &str) -> Result<Vec<u8>> {
-        let path = self.prefix.child(name);
+        let path = self.prefix.clone().join(name);
         let read = self.call(0, self.store.head(&path)).and_then(|head| {
             let size = head?.size;
             Ok(self.call(size, async { self.store.get(&path).await?.bytes().await })??)
@@ -319,7 +321,7 @@ impl Store for Remote {
     fn create(&self, name: &str, bytes: &[u8]) -> Result<bool> {
         use object_store::{Error, PutMode, PutOptions, PutPayload};
         let create = PutOptions { mode: PutMode::Create, ..Default::default() };
-        let path = self.prefix.child(name);
+        let path = self.prefix.clone().join(name);
         let put = self.store.put_opts(&path, PutPayload::from(bytes.to_vec()), create);
         let what = || format!("creating {self}/{name}");
         match self.call(bytes.len() as u64, put).with_context(what)? {
@@ -330,7 +332,7 @@ impl Store for Remote {
 
     fn delete(&self, name: &str) -> Result<()> {
         let what = || format!("deleting {self}/{name}");
-        match self.call(0, self.store.delete(&self.prefix.child(name))).with_context(what)? {
+        match self.call(0, self.store.delete(&self.prefix.clone().join(name))).with_context(what)? {
             Err(object_store::Error::NotFound { .. }) | Ok(()) => Ok(()),
             r => r.with_context(what),
         }
@@ -733,8 +735,11 @@ pub mod tests {
         ) -> object_store::Result<object_store::GetResult> {
             self.0.get_opts(at, opts).await
         }
-        async fn delete(&self, at: &object_store::path::Path) -> object_store::Result<()> {
-            self.0.delete(at).await
+        fn delete_stream(
+            &self,
+            at: futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>> {
+            self.0.delete_stream(at)
         }
         fn list(
             &self,
@@ -748,19 +753,13 @@ pub mod tests {
         ) -> object_store::Result<object_store::ListResult> {
             self.0.list_with_delimiter(prefix).await
         }
-        async fn copy(
+        async fn copy_opts(
             &self,
             from: &object_store::path::Path,
             to: &object_store::path::Path,
+            opts: object_store::CopyOptions,
         ) -> object_store::Result<()> {
-            self.0.copy(from, to).await
-        }
-        async fn copy_if_not_exists(
-            &self,
-            from: &object_store::path::Path,
-            to: &object_store::path::Path,
-        ) -> object_store::Result<()> {
-            self.0.copy_if_not_exists(from, to).await
+            self.0.copy_opts(from, to, opts).await
         }
     }
 

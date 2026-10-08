@@ -15,7 +15,7 @@ use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::http::HttpBuilder;
 use object_store::path::Path as ObjPath;
-use object_store::{ClientOptions, ObjectStore, RetryConfig, WriteMultipart};
+use object_store::{ClientOptions, ObjectStore, ObjectStoreExt, RetryConfig, WriteMultipart};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

@@ -31,7 +31,7 @@ glob = "0.3"
 # a query's conditions, read to skip the partitions they drop
 sqlparser = { version = "0.63", features = ["visitor"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-object_store = { version = "0.12", features = ["aws", "gcp", "azure", "http"] }
+object_store = { version = "0.14", features = ["aws", "gcp", "azure", "http"] }
 # a CSV reader's `nullstr`: the texts that are NULL
 regex = "1"
 parquet = { version = "60", default-features = false, features = ["arrow", "zstd", "snap", "lz4", "flate2-rust_backend", "simdutf8"] }

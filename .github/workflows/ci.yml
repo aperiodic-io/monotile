@@ -30,6 +30,16 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+  # every dependency's licence is one an Apache-2.0 release may ship, none has a security
+  # advisory, all come from crates.io (deny.toml)
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with: { tool: cargo-deny }
+      - run: cargo deny check
+
   test:
     runs-on: ubuntu-latest
     steps:
