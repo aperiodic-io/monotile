@@ -287,6 +287,8 @@ impl Sources {
                 (loc.at, loc.skip) = (Some((f.name.clone(), 0)), 0);
             }
             loc.done = false;
+            // ponytail: a store's file is fetched (or its row groups, past 16 MiB, as they are read)
+            // on the data thread, between batches; a read-ahead thread if that stalls a pipeline
             match self.files.fetch(std::slice::from_mut(&mut f)) {
                 Ok(()) => {
                     let all = vec![true; loc.columns.len()];
