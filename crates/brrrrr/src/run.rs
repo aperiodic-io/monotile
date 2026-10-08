@@ -1436,6 +1436,7 @@ pub fn run(a: Args) -> Result<()> {
         m.book_malformed.store(books.malformed, Ordering::Relaxed);
         m.future.store(engine.future(), Ordering::Relaxed);
         m.null_time.store(engine.null_time(), Ordering::Relaxed);
+        m.unfilled.store(engine.unfilled(), Ordering::Relaxed);
         m.asof_late_right.store(engine.asof_late_right(), Ordering::Relaxed);
         m.watermark.store(engine.min_watermark().unwrap_or(i64::MIN), Ordering::Relaxed);
         m.event_time.store(engine.max_event_time().unwrap_or(i64::MIN), Ordering::Relaxed);

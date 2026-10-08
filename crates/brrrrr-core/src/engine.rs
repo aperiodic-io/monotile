@@ -827,7 +827,9 @@ impl Hold {
 /// NULLs but its time, its keys, its `locf` columns (the key's last row's) and its `interpolate`
 /// ones (linear between the rows either side). A gap is filled when its key's next bucket comes,
 /// live as over history; the buckets after a key's last row only up to `finish`, as the input
-/// passes them (`close`).
+/// passes them (`close`). Without both `start` and `finish` to bound it, a gap of more than
+/// `MAX_GAP` buckets is not filled (`Engine::unfilled`): one row with a stray time decades
+/// off would have it write a row for every bucket between.
 #[derive(Clone)]
 struct Fill {
     time: usize,
@@ -842,7 +844,13 @@ struct Fill {
     /// Per key text: the last bucket out (a row's or a gap's), and the key's last row.
     last: FxHashMap<String, (i64, Row)>,
     text: String,
+    /// The gaps not filled for being longer than `MAX_GAP` buckets.
+    unfilled: u64,
 }
+
+/// The most buckets an unbounded `gap_fill` fills in one gap: 18 hours of seconds, 45 days of
+/// minutes, 7 years of hours.
+const MAX_GAP: i128 = 1 << 16;
 
 impl Fill {
     fn apply(&mut self, rows: &[Row]) -> Vec<Row> {
@@ -860,10 +868,14 @@ impl Fill {
                     out.push(r.clone());
                     continue;
                 }
-                Some((b, p)) => self.gaps(b.saturating_add(self.width), t, Some(p), Some(r), &mut out),
+                Some((b, p)) => {
+                    let filled = self.gaps(b.saturating_add(self.width), t, Some(p), Some(r), &mut out);
+                    self.unfilled += u64::from(!filled);
+                }
                 None => {
                     if let Some(s) = self.start {
-                        self.gaps(floor(s, self.width), t, None, Some(r), &mut out);
+                        let filled = self.gaps(floor(s, self.width), t, None, Some(r), &mut out);
+                        self.unfilled += u64::from(!filled);
                     }
                 }
             }
@@ -880,10 +892,14 @@ impl Fill {
 
     /// The rows of the buckets `from` .. `to` within `start` .. `finish`, between a key's rows
     /// `prev` and `next` (either may be missing, not both).
-    fn gaps(&self, from: i64, to: i64, prev: Option<&Row>, next: Option<&Row>, out: &mut Vec<Row>) {
-        let Some(like) = next.or(prev) else { return };
+    fn gaps(&self, from: i64, to: i64, prev: Option<&Row>, next: Option<&Row>, out: &mut Vec<Row>) -> bool {
+        let Some(like) = next.or(prev) else { return true };
         let from = self.start.map_or(from, |s| from.max(floor(s, self.width)));
         let to = self.finish.map_or(to, |f| to.min(f));
+        let unbounded = self.start.is_none() || self.finish.is_none();
+        if unbounded && i128::from(to) - i128::from(from) > MAX_GAP * i128::from(self.width) {
+            return false;
+        }
         let mut b = from;
         while b < to {
             let mut row = vec![Value::Null; self.cols];
@@ -899,6 +915,8 @@ impl Fill {
                     for &c in &self.interpolate {
                         row[c] = match (p[self.time].i64(), n[self.time].i64(), p[c].f64(), n[c].f64()) {
                             (Some(t0), Some(t1), Some(v0), Some(v1)) if t1 > t0 => {
+                                // times as far apart as i64's ends: their differences overflow i64
+                                let (b, t0, t1) = (i128::from(b), i128::from(t0), i128::from(t1));
                                 Value::F64(v0 + (v1 - v0) * (b - t0) as f64 / (t1 - t0) as f64)
                             }
                             _ => Value::Null,
@@ -909,6 +927,7 @@ impl Fill {
             out.push(row);
             b = b.saturating_add(self.width);
         }
+        true
     }
 
     /// The buckets every key skipped since its last row, before `finish` and `at`, the time the
@@ -922,7 +941,8 @@ impl Fill {
         for k in keys {
             let (b, row) = &self.last[&k];
             let n = out.len();
-            self.gaps(b.saturating_add(self.width), to, Some(row), None, &mut out);
+            let filled = self.gaps(b.saturating_add(self.width), to, Some(row), None, &mut out);
+            self.unfilled += u64::from(!filled);
             if let Some(t) = out[n..].last().and_then(|r| r[self.time].i64()) {
                 self.last.get_mut(&k).expect("a key").0 = t;
             }
@@ -2195,6 +2215,7 @@ impl Planner<'_> {
                     cols: p.schema.0.len(),
                     last: FxHashMap::default(),
                     text: String::new(),
+                    unfilled: 0,
                 };
                 p.ops.push(Op::Fill(Box::new(fill)));
                 Ok(Planned { schema: p.schema.qualify(alias.as_ref()), ..p })
@@ -3401,6 +3422,11 @@ impl Engine {
 
     /// Rows dropped for an event time that is NULL or not a time, summed over every window and
     /// join.
+    /// The gaps `gap_fill`s left unfilled for their length (`MAX_GAP`).
+    pub fn unfilled(&self) -> u64 {
+        self.ops().into_iter().map(|o| if let Op::Fill(f) = o { f.unfilled } else { 0 }).sum()
+    }
+
     pub fn null_time(&self) -> u64 {
         self.dropped().map(|d| d.null_time).sum()
     }
