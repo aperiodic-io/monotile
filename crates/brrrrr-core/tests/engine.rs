@@ -931,6 +931,107 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS b INTO o AS SELECT x FROM mid;"
     }
 }
 
+/// Parquet file streams (`type = 'file'`): a source if read, a sink if written, with the settings
+/// each takes; a pipeline reads Kafka or files, several file sources merged by a time column.
+#[test]
+fn file_stream_settings_are_checked() {
+    let file = |name: &str, cols: &str, settings: &str| {
+        format!("CREATE EXTERNAL STREAM {name} ({cols}) SETTINGS type = 'file', data_format = 'Parquet', {settings};")
+    };
+    let kafka = "CREATE EXTERNAL STREAM k (t datetime64(3), x float64) SETTINGS type = 'kafka', topic = 'k', data_format = 'JSONEachRow';";
+    let view = |from: &str| format!("CREATE MATERIALIZED VIEW v INTO o AS SELECT t, x, 'a' AS day FROM {from};");
+    let sink = |settings: &str| file("o", "t datetime64(3), x float64, day string", settings);
+    let src = |settings: &str| file("s", "t datetime64(3), x float64", settings);
+    let ok = |sql: String| {
+        let e = Engine::new(&parse(&sql).unwrap());
+        assert!(e.is_ok(), "{sql}: {:?}", e.err());
+    };
+    ok(format!("{}\n{}\n{}", src("path = 'in/*.parquet'"), sink("path = 'out/'"), view("s")));
+    ok(format!(
+        "{}\n{}\n{}",
+        src("path = 's3://b/in', time_column = 't'"),
+        sink("path = 'out', partition_by = 'day'"),
+        view("s")
+    ));
+    ok(format!("{kafka}\n{}\n{}", sink("path = 'out', partition_by = ' day , x '"), view("k")));
+    // several file sources, each with its time column
+    let two = format!(
+        "{}\n{}\n{}\nCREATE MATERIALIZED VIEW w INTO o AS SELECT t, x, 'b' AS day FROM s2;",
+        src("path = 'a', time_column = 't'"),
+        file("s2", "t int64, x float64", "path = 'b', time_column = 't'"),
+        sink("path = 'out'")
+    );
+    ok(format!("{two}\n{}", view("s")));
+    for (sql, why) in [
+        (
+            format!("{}\n{}\n{}", src("path = 'in'"), sink("path = 'o', topic = 'x'"), view("s")),
+            "o: unknown setting topic",
+        ),
+        (format!("{}\n{}\n{}", src("path = ''"), sink("path = 'o'"), view("s")), "s: no path"),
+        (
+            format!("{}\n{}\n{}", src("path = 'in'"), sink("path = 'o/*.parquet'"), view("s")),
+            "o: a sink's path is a directory, not a pattern",
+        ),
+        (
+            format!("{}\n{}\n{}", src("path = 'in'"), sink("path = 'o'").replace("'Parquet'", "'CSV'"), view("s")),
+            "o: a file stream's data_format must be 'Parquet', not \"CSV\"",
+        ),
+        (
+            format!(
+                "{}\n{}\n{}",
+                src("path = 'in'").replace(", data_format = 'Parquet'", ""),
+                sink("path = 'o'"),
+                view("s")
+            ),
+            "s: a file stream's data_format must be 'Parquet', not \"\"",
+        ),
+        (
+            format!("{}\n{}\n{}", src("path = 'in', partition_by = 'x'"), sink("path = 'o'"), view("s")),
+            "s: partition_by is a sink's setting",
+        ),
+        (
+            format!("{}\n{}\n{}", src("path = 'in'"), sink("path = 'o', time_column = 't'"), view("s")),
+            "o: time_column is a source's setting",
+        ),
+        (
+            format!("{}\n{}\n{}", src("path = 'in'"), sink("path = 'o', partition_by = 'day, sym'"), view("s")),
+            "o: partition_by sym: no column sym",
+        ),
+        (
+            format!("{}\n{}\n{}", src("path = 'in'"), sink("path = 'o', partition_by = 'day,x,t'"), view("s")),
+            "o: partition_by every column: no column is left",
+        ),
+        (
+            format!("{}\n{}\n{}", src("path = 'in', time_column = 'y'"), sink("path = 'o'"), view("s")),
+            "s: time_column y: no column y",
+        ),
+        (
+            format!("{}\n{}\n{}", src("path = 'in', time_column = 'x'"), sink("path = 'o'"), view("s")),
+            "s: time_column x is F64, not a time",
+        ),
+        (
+            format!(
+                "{}\n{}\n{}",
+                file("s", "t datetime64(3), x float64, a array(int64)", "path = 'in'"),
+                sink("path = 'o'"),
+                view("s")
+            ),
+            "s: a: a file stream's columns are numbers, text, times or booleans",
+        ),
+        (
+            format!("{kafka}\n{}\n{}\n{}", src("path = 'in'"), sink("path = 'o'"), view("s")),
+            "s: a pipeline reads Kafka topics or files, not both (k reads a topic)",
+        ),
+        (
+            format!("{two}\n{}", view("s")).replace(", time_column = 't'", ""),
+            "s: several file sources are read merged in time order",
+        ),
+    ] {
+        let err = Engine::new(&parse(&sql).unwrap()).err().unwrap_or_else(|| panic!("{why}: accepted: {sql}"));
+        assert!(err.starts_with(why), "{err} is not {why}");
+    }
+}
+
 /// Types that are certain (literals, typed columns) are checked at plan time, as the Timeplus
 /// fork checks them at CREATE: arithmetic on a string, a numeric aggregate of one, or one as a condition
 /// used to run and give 0, NULL or false for every row.

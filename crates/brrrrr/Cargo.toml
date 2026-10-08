@@ -83,3 +83,9 @@ name = "sql"
 path = "tests/sql/main.rs"
 harness = false
 required-features = ["sql"]
+
+# `brrrrr run` over Parquet files (file sources and sinks), as a user runs it
+[[test]]
+name = "parquet"
+path = "tests/parquet.rs"
+required-features = ["sql"]

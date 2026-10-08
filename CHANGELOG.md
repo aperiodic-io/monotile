@@ -24,7 +24,10 @@ the PostgreSQL protocol (psql, Grafana, psycopg, JDBC, node-postgres, pgx). A br
 query time limits, cancellation and admission come with it.
 
 **Pipelines.** `brrrrr run` runs the same SQL from Kafka topics of JSON to Kafka, exactly once
-across crashes, with checkpoints.
+across crashes, with checkpoints. Sources and sinks can also be Parquet files, on disk or in an
+object store: a source reads its files in name order and the ones that land later, several
+merged in time order; a sink writes each checkpoint's rows to files of their own, in Hive
+directories, exactly once.
 
 Pipelines written in Timeplus Proton's dialect run unchanged. Checkpoints are format 10; those
 of format 9, written by builds before this release, are restored and written back as 10 at the

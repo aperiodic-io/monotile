@@ -106,8 +106,9 @@ query gives over the table, emitted as each bar closes.
   run 1.6x faster than DuckDB and TCA per symbol 1.2x; plain group-bys and filters are on par
   or slower ([bench/sql](bench/sql/README.md)).
 - **Exactly-once streaming.** `brrrrr run` runs the same SQL as a pipeline from Kafka topics of
-  JSON (or Apache Iggy) to Kafka, with checkpoints, surviving `kill -9` without a lost or repeated
-  message ([an example](examples/pipelines)).
+  JSON (or Apache Iggy, or Parquet files as they land) to Kafka or Parquet files, with
+  checkpoints, surviving `kill -9` without a lost or repeated message or row
+  ([an example](examples/pipelines)).
 - **Errors that say what to do.** What brrrrr cannot run is refused with the reason and what to
   write instead, never run as something else.
 

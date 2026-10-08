@@ -8,6 +8,11 @@ mod align;
 mod historical;
 mod iggy;
 mod metrics;
+#[cfg(feature = "sql")]
+mod parquet;
+#[cfg(not(feature = "sql"))]
+#[path = "parquet_stub.rs"]
+mod parquet;
 mod run;
 #[cfg(feature = "sql")]
 mod serve;
@@ -43,7 +48,8 @@ enum Cmd {
     Serve(Box<serve::Args>),
     /// Checks a pipeline's SQL file: it parses and every view compiles; lists its sources and sinks.
     Validate { sql: std::path::PathBuf },
-    /// Runs a streaming pipeline: Kafka (or Iggy) sources to Kafka sinks, exactly once, with checkpoints.
+    /// Runs a streaming pipeline: Kafka (or Iggy, or Parquet file) sources to Kafka or Parquet file sinks,
+    /// exactly once, with checkpoints.
     Run(Box<run::Args>),
     /// Run a pipeline over days of Parquet files, symbol by symbol (ADR-0016).
     #[cfg(feature = "historical")]
@@ -60,8 +66,11 @@ fn validate(path: &std::path::Path) -> Result<String, String> {
         engine.skipped.len()
     );
     for s in cat.streams.values().filter(|s| s.kind == Kind::External) {
-        let (arrow, topic) = (if run::is_sink(&cat, s) { "->" } else { "<-" }, &s.settings["topic"]);
-        out.push_str(&format!("{} {arrow} {topic}\n", s.name));
+        let arrow = if run::is_sink(&cat, s) { "->" } else { "<-" };
+        match run::is_file(s) {
+            true => out.push_str(&format!("{} {arrow} {} (Parquet files)\n", s.name, s.settings["path"].trim())),
+            false => out.push_str(&format!("{} {arrow} {}\n", s.name, s.settings["topic"])),
+        }
     }
     Ok(out)
 }
@@ -120,6 +129,15 @@ mod tests {
         // a view into an S3 export is skipped, not run
         let out = validate("../../fixtures/pipelines/bars.sql".as_ref()).unwrap();
         assert!(out.starts_with("7 views run, 1 skipped (S3 exports)\n"), "{out}");
+    }
+
+    #[test]
+    fn validate_lists_parquet_file_streams_with_their_paths() {
+        let out = validate("../../examples/pipelines/parquet.sql".as_ref()).unwrap();
+        assert_eq!(
+            out,
+            "1 views run, 0 skipped (S3 exports)\nbars -> bars/ (Parquet files)\ntrades <- trades/ (Parquet files)\n"
+        );
     }
 
     #[test]

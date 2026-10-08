@@ -1044,7 +1044,9 @@ impl Layout {
                             let line = at + 1 + f.options.skip + usize::from(matches!(f.format, Format::Csv { .. }));
                             a = to_times(&a, spec, line, name).with_context(|| f.name.clone())?;
                         } else if let (Some(have), Some(want)) = (engine_type(a.data_type()), arrow_type(ty)) {
-                            if have != *ty.base() {
+                            // times of any precision are µs here: as they are
+                            let times = matches!((&have, ty.base()), (Type::Time(_), Type::Time(_)));
+                            if have != *ty.base() && !times {
                                 // a number widened, or anything as text; not a value lost
                                 let num = |t: &Type| matches!(t, Type::Int(_) | Type::UInt(_));
                                 let widens = matches!(ty.base(), Type::Str | Type::F64)

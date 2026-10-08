@@ -3588,6 +3588,7 @@ fn check_settings(cat: &Catalog) -> R<()> {
                 s.settings.keys().find(|k| !STORAGE.contains(&k.as_str())).map(|k| format!("unknown setting {k}"))
             }
             Kind::Table(_) => (get("type") != Some("s3")).then(|| "an external table must be type = 's3'".into()),
+            Kind::External if get("type") == Some("file") => file_settings(cat, s),
             Kind::External => {
                 let unknown = s.settings.keys().find(|k| !KAFKA.contains(&k.as_str()));
                 let is_sink = cat.views.iter().any(|v| v.target == s.name);
@@ -3595,7 +3596,7 @@ fn check_settings(cat: &Catalog) -> R<()> {
                 if let Some(k) = unknown {
                     Some(format!("unknown setting {k}"))
                 } else if get("type") != Some("kafka") {
-                    Some("an external stream must be type = 'kafka'".into())
+                    Some("an external stream must be type = 'kafka' or 'file'".into())
                 } else if get("topic").is_none_or(str::is_empty) {
                     Some("no topic".into())
                 } else if is_sink && format != "JSONEachRow" {
@@ -3620,7 +3621,70 @@ fn check_settings(cat: &Catalog) -> R<()> {
             return Err(format!("{}: {p}", s.name));
         }
     }
+    // a pipeline's sources are Kafka topics or files: `brrrrr run` reads one kind at a time,
+    // files of several sources merged in time order
+    let read = |s: &&Stream| s.kind == Kind::External && !cat.views.iter().any(|v| v.target == s.name);
+    let (files, topics): (Vec<&Stream>, Vec<&Stream>) =
+        cat.streams.values().filter(read).partition(|s| s.settings.get("type").is_some_and(|t| t == "file"));
+    if let (Some(f), Some(t)) = (files.first(), topics.first()) {
+        return Err(format!("{}: a pipeline reads Kafka topics or files, not both ({} reads a topic)", f.name, t.name));
+    }
+    if let Some(f) = files.iter().find(|s| files.len() > 1 && !s.settings.contains_key("time_column")) {
+        return Err(format!(
+            "{}: several file sources are read merged in time order: set each one's time_column",
+            f.name
+        ));
+    }
     Ok(())
+}
+
+/// A file stream's settings (`type = 'file'`): Parquet files under `path`, a directory, a glob
+/// or a URL. A source is read in file name order; `time_column` merges several sources' rows in
+/// time order. A sink writes its rows a file per checkpoint, in Hive directories of the columns
+/// `partition_by` names, which its files then do not hold.
+fn file_settings(cat: &Catalog, s: &Stream) -> Option<String> {
+    const FILE: [&str; 5] = ["type", "data_format", "path", "partition_by", "time_column"];
+    let get = |k: &str| s.settings.get(k).map(String::as_str);
+    let is_sink = cat.views.iter().any(|v| v.target == s.name);
+    let column = |c: &str| s.columns.iter().find(|x| x.name == c);
+    if let Some(k) = s.settings.keys().find(|k| !FILE.contains(&k.as_str())) {
+        return Some(format!("unknown setting {k}"));
+    }
+    if get("data_format") != Some("Parquet") {
+        return Some(format!(
+            "a file stream's data_format must be 'Parquet', not {:?}",
+            get("data_format").unwrap_or("")
+        ));
+    }
+    if get("path").is_none_or(|p| p.trim().is_empty()) {
+        return Some("no path".into());
+    }
+    if is_sink && get("path").is_some_and(|p| p.contains(['*', '?', '['])) {
+        return Some("a sink's path is a directory, not a pattern".into());
+    }
+    if let Some(c) = s.columns.iter().find(|c| matches!(c.ty.base(), Type::Array(_) | Type::Map(..) | Type::Any)) {
+        return Some(format!("{}: a file stream's columns are numbers, text, times or booleans", c.name));
+    }
+    match (is_sink, get("partition_by"), get("time_column")) {
+        (false, Some(_), _) => Some("partition_by is a sink's setting".into()),
+        (true, _, Some(_)) => Some("time_column is a source's setting".into()),
+        (true, Some(by), _) => {
+            let by: Vec<&str> = by.split(',').map(str::trim).collect();
+            if let Some(c) = by.iter().find(|c| column(c).is_none()) {
+                Some(format!("partition_by {c}: no column {c}"))
+            } else if s.columns.iter().all(|c| by.contains(&c.name.as_str())) {
+                Some("partition_by every column: no column is left to write in the files".into())
+            } else {
+                None
+            }
+        }
+        (false, _, Some(c)) => match column(c).map(|c| c.ty.base()) {
+            None => Some(format!("time_column {c}: no column {c}")),
+            Some(Type::Time(_) | Type::Int(_)) => None,
+            Some(t) => Some(format!("time_column {c} is {t:?}, not a time")),
+        },
+        _ => None,
+    }
 }
 
 /// Casts the values of a row in `st`'s column order to the column types; values that already
