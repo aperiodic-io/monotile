@@ -109,12 +109,6 @@ pub struct Chunk {
     pub rows: Vec<Row>,
 }
 
-/// The files of every file stream: one cache and the object stores' clients, shared.
-fn shared() -> Arc<Files> {
-    static FILES: std::sync::OnceLock<Arc<Files>> = std::sync::OnceLock::new();
-    FILES.get_or_init(|| Arc::new(Files::default())).clone()
-}
-
 /// The file sources of a pipeline.
 pub struct Sources {
     files: Arc<Files>,
@@ -153,7 +147,7 @@ impl Sources {
     /// The file sources of `cat`, resuming at `positions` (a checkpoint's), their files listed:
     /// `None` if there are none.
     pub fn open(cat: &Catalog, positions: &[(String, i32, i64)]) -> Result<Option<Sources>> {
-        Sources::listing_every(cat, positions, shared(), LIST_EVERY)
+        Sources::listing_every(cat, positions, Arc::new(Files::default()), LIST_EVERY)
     }
 
     fn listing_every(
@@ -202,17 +196,12 @@ impl Sources {
     fn list(&mut self, i: usize, now: Instant, start: bool) -> Result<()> {
         let loc = &mut self.locs[i];
         loc.listed = Some(now);
-        let missing = local(&loc.path).is_some_and(|p| !files::has_glob(p) && !std::path::Path::new(p).exists());
-        let found = if missing {
-            vec![] // no directory yet: no files yet
-        } else {
-            // by their names: a file of another kind there is not one of the source's
-            match self.files.list(&loc.path, None) {
-                Ok(found) => found.into_iter().filter(|f| f.format == files::Format::Parquet).collect(),
-                // an empty directory or prefix: no files yet
-                Err(e) if format!("{e}").starts_with("no file") => vec![],
-                Err(e) => return Err(e),
-            }
+        // by their names: a file of another kind there is not one of the source's
+        let found: Vec<_> = match self.files.list(&loc.path, None) {
+            Ok(found) => found.into_iter().filter(|f| f.format == files::Format::Parquet).collect(),
+            // no directory yet, or an empty one or prefix: no files yet
+            Err(e) if format!("{e}").starts_with("no file") => vec![],
+            Err(e) => return Err(e),
         };
         if start {
             loc.first = found.last().map(|f| f.name.clone());
@@ -473,7 +462,7 @@ pub struct Cut {
 impl Sinks {
     /// The file sinks of `cat`, their files named for `pipeline`: `None` if there are none.
     pub fn open(cat: &Catalog, pipeline: &str) -> Option<Sinks> {
-        Sinks::with_files(cat, pipeline, shared())
+        Sinks::with_files(cat, pipeline, Arc::new(Files::default()))
     }
 
     fn with_files(cat: &Catalog, pipeline: &str, files: Arc<Files>) -> Option<Sinks> {
@@ -869,6 +858,10 @@ mod tests {
         let mut s = sources(&reading(&[("t", &empty.display().to_string(), None)]), &[], Duration::ZERO);
         assert!(s.past_start());
         assert_eq!(drain(&mut s, 10, t0), []);
+        // a listing that fails for another reason fails
+        let bad = format!("{}/[", d.path().display());
+        let e = Sources::listing_every(&reading(&[("t", &bad, None)]), &[], Arc::new(Files::default()), Duration::ZERO);
+        assert!(e.is_err_and(|e| format!("{e}").starts_with(&bad)));
     }
 
     #[test]
