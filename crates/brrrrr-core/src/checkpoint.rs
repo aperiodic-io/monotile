@@ -33,7 +33,7 @@ use zstd::stream::write::Encoder;
 /// The first bytes of every checkpoint.
 pub const MAGIC: [u8; 4] = *b"BRRR";
 /// The format version this build writes.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 10;
 /// `fnv64` of `tests/checkpoint-layout.json`, the traced layout of this version.
 pub const LAYOUT: u64 = 0x38c2_fd38_91ea_215f;
 /// The older versions this build also reads, each under the one layout its build traced
@@ -42,7 +42,11 @@ pub const LAYOUT: u64 = 0x38c2_fd38_91ea_215f;
 /// bytes decode into this build's types. `tests/checkpoint.rs` proves the appends
 /// (`this_version_only_appends_to_the_layouts_it_reads`) and restores the committed checkpoints
 /// of each. Anything older is stale (`stale_version`).
-pub const READS: [(u16, u64); 0] = [];
+pub const READS: [(u16, u64); 1] = [
+    // format 9, which this one appended count(DISTINCT), exact quantiles, gap fill and lead to.
+    // Remove once every pipeline has checkpointed at 10 (its first checkpoint after the deploy).
+    (9, 0xed67_2738_89af_ffd0),
+];
 const HEADER: usize = 4 + 2 + 8;
 /// zstd's default: a 190 MB state compresses in about a second and to a tenth or less.
 const ZSTD_LEVEL: i32 = 3;
