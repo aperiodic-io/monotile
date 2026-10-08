@@ -1,0 +1,83 @@
+<!-- title: Python · brrrrr | description: brrrrr in Python: query files, object stores and DataFrames with SQL, and get Polars, pandas or pyarrow back. The API in full. -->
+<p class="eyebrow">Reference</p>
+<h1>Python</h1>
+<p class="lede"><code>pip install brrrrr</code> gives a module and a shell. It needs no server, and reads the same files and object stores as the binary.</p>
+<pre><code class="sh">$ pip install brrrrr           # Python 3.9+, Linux, macOS and Windows wheels</code></pre>
+
+<h2 id="query">Query</h2>
+<pre><code class="py">import brrrrr
+
+r = brrrrr.sql("""
+    SELECT time_bucket('1h', ts) AS hour, symbol, vwap(price, size) AS vwap
+    FROM 's3://my-bucket/trades/2024-01-02/*.parquet'
+    GROUP BY hour, symbol ORDER BY hour, symbol
+""")
+r.show()         # a table, printed
+r.pl()           # a Polars DataFrame
+r.df()           # a pandas DataFrame
+r.arrow()        # a pyarrow Table</code></pre>
+<p>Several statements separated by <code>;</code> run in order, and the last one's result comes back.</p>
+
+<h2 id="dataframes">DataFrames as tables</h2>
+<p>A Polars or pandas DataFrame, or a pyarrow Table, in a variable is a table by its name. Nothing is registered; brrrrr finds it where the query was written.</p>
+<pre><code class="py">import polars as pl, brrrrr
+
+fills = pl.read_csv("fills.csv", try_parse_dates=True)
+quotes = pl.read_parquet("quotes.parquet")
+
+tca = brrrrr.sql("""
+    SELECT f.order_id, f.ts, f.price, q.bid, q.ask,
+           (f.price - (q.bid + q.ask) / 2) * f.qty AS cost
+    FROM fills f
+    ASOF JOIN quotes q ON f.symbol = q.symbol AND f.ts &gt;= q.ts
+""").pl()</code></pre>
+<p>Anything else with <code>__arrow_c_stream__</code> (the Arrow PyCapsule interface) works the same way.</p>
+
+<h2 id="sessions">Sessions</h2>
+<p><code>brrrrr.sql</code> runs on a default session. A session of your own keeps its names apart and caps its threads:</p>
+<pre><code class="py">with brrrrr.connect(threads=4) as con:
+    con.register("trades", "s3://my-bucket/trades/")       # a location
+    con.register("refdata", instruments_df)                 # a DataFrame, held
+    con.sql("CREATE VIEW buys AS SELECT * FROM trades WHERE side = 'buy'")
+    con.sql("SELECT symbol, sum(size) FROM buys GROUP BY symbol").show()</code></pre>
+
+<h2 id="write">Write</h2>
+<pre><code class="py">r.write("bars.parquet")                          # .parquet, .csv or .json, by the name
+r.write("s3://my-bucket/bars/2024-01-02.parquet") # straight to an object store
+brrrrr.sql("COPY (FROM trades WHERE symbol = 'BTC') TO 'btc.csv'")</code></pre>
+
+<h2 id="api">API</h2>
+<div class="tbl"><table>
+<thead><tr><th>Call</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>brrrrr.sql(query)</code></td><td>Runs statements on the default session; returns a <code>Result</code>.</td></tr>
+<tr><td><code>brrrrr.connect(threads=None)</code></td><td>A new <code>Connection</code>, usable as a context manager.</td></tr>
+<tr><td><code>Connection.sql(query)</code></td><td>As <code>brrrrr.sql</code>, on this session. Also <code>execute</code>.</td></tr>
+<tr><td><code>Connection.register(name, data)</code></td><td>Names a location (a string) or a DataFrame or Arrow table.</td></tr>
+<tr><td><code>Connection.unregister(name)</code></td><td>Forgets a name.</td></tr>
+<tr><td><code>Result.pl()</code>, <code>.df()</code>, <code>.arrow()</code></td><td>The rows as Polars, pandas or pyarrow.</td></tr>
+<tr><td><code>Result.fetchall()</code>, <code>.fetchone()</code></td><td>The rows as tuples (DB-API style).</td></tr>
+<tr><td><code>Result.columns</code>, <code>len(result)</code></td><td>Column names; the number of rows.</td></tr>
+<tr><td><code>Result.show(max_rows=40)</code>, <code>.table(max_rows=40)</code></td><td>The rows as a table: printed, or as text.</td></tr>
+<tr><td><code>Result.write(path)</code></td><td>Writes Parquet, CSV or JSON lines to a file or object store.</td></tr>
+<tr><td><code>Result.message</code></td><td>What a statement without rows said (<code>COPY</code>'s count, a view's creation).</td></tr>
+<tr><td><code>brrrrr.Error</code></td><td>Raised with brrrrr's message: what went wrong and what to write instead.</td></tr>
+</tbody></table></div>
+
+<h2 id="shell">The shell</h2>
+<p><code>brrrrr-sql</code> (or <code>python -m brrrrr</code>) is an interactive SQL shell, or runs one statement:</p>
+<pre><code class="sh">$ brrrrr-sql "FROM 'trades.parquet' LIMIT 5"
+$ brrrrr-sql --csv "SELECT symbol, count(*) FROM 'trades.parquet' GROUP BY symbol" &gt; counts.csv
+$ brrrrr-sql -f report.sql      # a file's statements: the last one's answer is shown</code></pre>
+
+<h2 id="notebooks">In notebooks</h2>
+<p>A <code>Result</code> shows as an HTML table when it is the last thing in a cell. In Jupyter or IPython, load the extension once, then write SQL in cells; the notebook's DataFrames are tables by their names:</p>
+<pre><code class="py">%load_ext brrrrr</code></pre>
+<pre><code class="sql">%%sql -o bars
+SELECT time_bucket('1m', ts) AS minute, symbol, last(price, ts) AS close, sum(size) AS volume
+FROM trades
+GROUP BY minute, symbol
+ORDER BY minute</code></pre>
+<pre><code class="py">%sql SELECT symbol, count(*) AS n FROM 'trades.parquet' GROUP BY symbol
+bars.tail(3)   # -o bars kept the answer as a DataFrame</code></pre>
+<p><code>%sql</code> takes a statement on its line, <code>%%sql</code> the whole cell. <code>-o name</code> also keeps the answer in the notebook as a DataFrame: Polars if it is installed, pandas otherwise. The notebook has one session, so views and named tables last from cell to cell. An error prints brrrrr's reason. Long-running queries use every core by default; give a session fewer threads to share a machine. A tutorial on a real day of trades: <a href="https://github.com/aperiodic-io/monotile/blob/main/examples/notebooks/crypto-tca.ipynb">crypto-tca.ipynb</a>.</p>

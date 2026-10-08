@@ -1,0 +1,178 @@
+<!-- title: brrrrr | description: SQL for tick data and other time series: query Parquet, CSV and JSON in place, on disk or in S3, GCS and Azure. Bars, as-of joins, VWAP, rolling windows. The same SQL live and over history. Open source, Apache-2.0. -->
+<section class="hero">
+  <div>
+    <p class="eyebrow">Open source · Apache-2.0 · one binary<br><a href="blog/introducing-brrrrr.html">Introducing brrrrr →</a></p>
+    <h1>SQL for tick data, <em>live and historical.</em></h1>
+    <p class="lede">Query Parquet, CSV and JSON where they are, on disk or in S3, GCS and Azure. Bars, as-of joins, VWAP and rolling windows in plain SQL. Then serve the same query live, as rows arrive.</p>
+    <div class="install"><code>pip install brrrrr</code><button class="copy" type="button">Copy</button></div>
+    <div class="btns">
+      <a class="btn primary" href="docs/index.html">Get started</a>
+      <a class="btn" href="docs/cookbook.html">See {{recipes}} recipes</a>
+      <a class="btn" href="https://github.com/aperiodic-io/monotile">GitHub</a>
+    </div>
+  </div>
+  <figure class="tape" aria-label="Ticks arriving and one-minute bars forming">
+    <div class="tape-bar"><span>brrrrr serve · live view <b>bars</b></span><span class="live">live</span></div>
+<pre class="nocopy"><code class="sql">CREATE LIVE VIEW bars AS
+SELECT time_bucket('1m', ts) AS minute, symbol,
+       first(price, ts) AS open, max(price) AS high,
+       min(price) AS low, last(price, ts) AS close
+FROM trades GROUP BY minute, symbol</code></pre>
+    <canvas id="tape" role="img" aria-label="Candlestick chart of one-minute bars, with the current minute's ticks on the right"></canvas>
+    <figcaption class="tape-foot"><span>ticks <b id="t-ticks">0</b></span><span>bars closed <b id="t-bars">0</b></span><span>BTC <b id="t-last">0</b></span><span>(simulated)</span></figcaption>
+  </figure>
+</section>
+
+<section class="band">
+  <p class="eyebrow">Three ways in</p>
+  <h2>Point it at the files you already have</h2>
+  <div class="rows">
+    <div class="row">
+      <div>
+        <h3>From the shell</h3>
+        <p><code>brrrrr sql</code> runs a query over a file, a glob, a Hive-partitioned directory or a bucket, and prints a table, CSV or JSON, or writes Parquet. No load step, no schema, no server.</p>
+        <p><a href="docs/cli.html">Command line reference</a></p>
+      </div>
+<pre><code class="sql">$ brrrrr sql "
+  SELECT symbol, count(*) AS trades, vwap(price, size) AS vwap
+  FROM 's3://my-bucket/trades/date=2024-01-*/*.parquet'
+  GROUP BY symbol ORDER BY trades DESC"</code></pre>
+    </div>
+    <div class="row">
+      <div>
+        <h3>From Python</h3>
+        <p>Results go to Polars, pandas and pyarrow through the Arrow C stream interface. A DataFrame in a variable is a table by its name.</p>
+        <p><a href="docs/python.html">Python guide</a></p>
+      </div>
+<pre><code class="py">import brrrrr, polars as pl
+
+trades = pl.read_parquet("trades.parquet")
+bars = brrrrr.sql("""
+    SELECT time_bucket('5m', ts) AS t, symbol,
+           vwap(price, size) AS vwap, sum(size) AS volume
+    FROM trades GROUP BY t, symbol
+""").pl()</code></pre>
+    </div>
+    <div class="row">
+      <div>
+        <h3>As a server</h3>
+        <p><code>brrrrr serve</code> keeps today's rows in memory and the rest in Parquet by day, and answers one query over both. HTTP with a browser console, the PostgreSQL protocol for psql, Grafana and every driver, and subscriptions.</p>
+        <p><a href="docs/server.html">Server guide</a></p>
+      </div>
+<pre><code class="sh">$ brrrrr serve --data ./data &amp;
+$ curl -X POST 'localhost:4242/write/trades?format=csv' --data-binary @trades.csv
+$ curl -X POST localhost:4242/query --data "CREATE LIVE VIEW bars AS
+    SELECT time_bucket('1m', ts) AS minute, symbol, last(price, ts) AS close
+    FROM trades GROUP BY minute, symbol"
+$ psql -h localhost -p 5433 -c "SELECT * FROM bars ORDER BY minute DESC LIMIT 5"</code></pre>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <p class="eyebrow">The cookbook</p>
+  <h2>The queries people actually run</h2>
+  <p class="lede">Each recipe runs in CI against the same files in DuckDB, and must give the same answer.</p>
+  <div class="grid3">
+    <a class="card" href="docs/cookbook.html#ohlcv"><h3>OHLCV bars</h3><p>Candles from trades at any width: <code>time_bucket</code>, <code>first</code>, <code>last</code>.</p>
+<pre class="nocopy"><code class="sql">SELECT time_bucket('1m', ts) AS minute, symbol,
+  first(price, ts) AS open, last(price, ts) AS close
+FROM 'trades.parquet' GROUP BY minute, symbol</code></pre></a>
+    <a class="card" href="docs/cookbook.html#slippage"><h3>Transaction costs</h3><p>Every trade against the quote it met, with an exact as-of join.</p>
+<pre class="nocopy"><code class="sql">SELECT t.*, (t.price - (q.bid + q.ask) / 2) AS slip
+FROM trades t ASOF JOIN quotes q
+  ON t.symbol = q.symbol AND t.ts &gt;= q.ts</code></pre></a>
+    <a class="card" href="docs/cookbook.html#realized_vol"><h3>Volatility and risk</h3><p>Returns, realized volatility, drawdowns, z-scores over rolling windows.</p>
+<pre class="nocopy"><code class="sql">SELECT ts, price / lag(price) OVER w - 1 AS ret
+FROM trades
+WINDOW w AS (PARTITION BY symbol ORDER BY ts)</code></pre></a>
+    <a class="card" href="docs/cookbook.html#flow"><h3>Order flow</h3><p>Buy and sell volume, imbalance and volume profiles with <code>FILTER</code>.</p>
+<pre class="nocopy"><code class="sql">SELECT symbol,
+  sum(size) FILTER (WHERE side = 'buy') AS bought
+FROM trades GROUP BY symbol</code></pre></a>
+    <a class="card" href="docs/cookbook.html#gaps"><h3>Data quality</h3><p>Gaps in a feed, duplicates, and downsampling for a chart.</p>
+<pre class="nocopy"><code class="sql">SELECT ts, ts - lag(ts) OVER w AS gap
+FROM quotes
+WINDOW w AS (PARTITION BY symbol ORDER BY ts)</code></pre></a>
+    <a class="card" href="docs/cookbook.html#latency_percentiles"><h3>Sensors and operations</h3><p>Counter rates, latency percentiles, anomalies and sessions.</p>
+<pre class="nocopy"><code class="sql">SELECT time_bucket('1m', ts) AS minute,
+  quantile_cont(latency_ms, 0.99) AS p99
+FROM readings GROUP BY minute</code></pre></a>
+    <a class="card" href="docs/cookbook.html#markouts"><h3>Markouts</h3><p>Where the mid went 1, 5 and 60 seconds after each trade: as-of joins at a time offset.</p>
+<pre class="nocopy"><code class="sql">ASOF JOIN quotes q5 ON t.symbol = q5.symbol
+  AND t.ts + INTERVAL '5 seconds' &gt;= q5.ts</code></pre></a>
+    <a class="card" href="docs/cookbook.html#gapfill_bars"><h3>Gap filling</h3><p>Every minute shown, the last price carried into the empty ones.</p>
+<pre class="nocopy"><code class="sql">SELECT time_bucket_gapfill('1m', ts) AS minute,
+  locf(last(price, ts)) AS close
+FROM trades GROUP BY minute</code></pre></a>
+    <a class="card" href="docs/cookbook.html#daily_new_york"><h3>Time zones</h3><p>Days and hours of any zone, daylight saving included.</p>
+<pre class="nocopy"><code class="sql">SELECT time_bucket('1 day', ts, 'America/New_York')
+  AS day, last(price, ts) AS close
+FROM trades GROUP BY day</code></pre></a>
+  </div>
+  <div class="btns"><a class="btn" href="docs/cookbook.html">All {{recipes}} recipes, with their answers</a></div>
+</section>
+
+<section class="band">
+  <p class="eyebrow">One engine</p>
+  <h2>The query you research with is the query that runs live</h2>
+  <p class="lede">An ad-hoc query, a live view and a streaming pipeline are the same engine running the same plan. A backfill gives exactly what live would have given, so research, dashboards and production never disagree.</p>
+  <div class="flow" role="img" aria-label="Files and object stores, or rows arriving over HTTP and Kafka, flow into the same SQL, which answers queries, live views and Kafka topics">
+    <div class="box"><b>In</b>Parquet, CSV, JSON on disk, S3, GCS, Azure, HTTP · rows over HTTP · Kafka topics</div>
+    <div class="arrow" aria-hidden="true">→</div>
+    <div class="box mid"><b>One SQL</b>time buckets, as-of joins, <code>first</code>/<code>last</code>, VWAP, EMA, rolling windows, percentiles</div>
+    <div class="arrow" aria-hidden="true">→</div>
+    <div class="box"><b>Out</b>tables, CSV, JSON, Parquet · DataFrames · live views and subscriptions · exactly-once Kafka</div>
+  </div>
+</section>
+
+<section class="band">
+  <p class="eyebrow">Benchmarks</p>
+  <h2>Fast where time series are slow</h2>
+  <p class="lede">One day of 10 million trades and 20 million quotes in Parquet, 8 threads, against {{bench_engines}} on the same machine. Seconds, lower is better.</p>
+  {{bench_legend}}
+  <div class="bench" id="bench-teaser">{{bench}}</div>
+  <p><a href="benchmarks.html">Every query, memory, and where brrrrr is slower</a></p>
+</section>
+
+<section class="band">
+  <p class="eyebrow">Where it fits</p>
+  <h2>Built for anything with a timestamp</h2>
+  <div class="grid3">
+    <a class="card" href="use-cases.html#research"><h3>Quant research</h3><p>Bars, signals and backtests over years of Parquet, from a notebook.</p><span class="go">Research →</span></a>
+    <a class="card" href="use-cases.html#tca"><h3>Execution and TCA</h3><p>Fills against the quotes they met: slippage, effective spreads, imbalance.</p><span class="go">TCA →</span></a>
+    <a class="card" href="use-cases.html#crypto"><h3>Crypto market data</h3><p>Exchange feeds from Kafka to live bars and a day-partitioned archive.</p><span class="go">Crypto →</span></a>
+    <a class="card" href="use-cases.html#iot"><h3>Sensors and IoT</h3><p>Readings per device: rates, percentiles, anomalies, downsampling.</p><span class="go">IoT →</span></a>
+    <a class="card" href="use-cases.html#ops"><h3>Operations metrics</h3><p>Latency percentiles and error rates from logs, live on a Grafana panel.</p><span class="go">Ops →</span></a>
+    <a class="card" href="use-cases.html#events"><h3>Product events</h3><p>Sessions, funnels by time and activity curves from event exports.</p><span class="go">Events →</span></a>
+  </div>
+</section>
+
+<section class="band">
+  <p class="eyebrow">Compared</p>
+  <h2>How it sits next to what you use</h2>
+  <div class="tbl"><table>
+    <thead><tr><th></th><th>brrrrr</th><th>kdb+</th><th>DuckDB</th><th>QuestDB</th></tr></thead>
+    <tbody>
+      <tr><td>Query files and object stores in place</td><td class="yes">yes</td><td>Parquet module</td><td class="yes">yes</td><td class="no">ingest first</td></tr>
+      <tr><td>As-of joins, bars, VWAP, rolling windows</td><td class="yes">yes</td><td class="yes">yes, in q</td><td>partly</td><td class="yes">yes</td></tr>
+      <tr><td>The same query live and over history</td><td class="yes">yes</td><td>by hand, in q</td><td class="no">batch only</td><td>separate paths</td></tr>
+      <tr><td>Server: HTTP, PostgreSQL protocol, subscriptions</td><td class="yes">yes</td><td>IPC, q</td><td class="no">no</td><td class="yes">yes</td></tr>
+      <tr><td>Exactly-once Kafka pipelines</td><td class="yes">yes</td><td>by hand</td><td class="no">no</td><td class="no">no</td></tr>
+      <tr><td>Licence</td><td>Apache-2.0</td><td>proprietary</td><td>MIT</td><td>Apache-2.0</td></tr>
+    </tbody>
+  </table></div>
+  <p><a href="compare.html">The full comparison, with where each is the better choice</a></p>
+</section>
+
+<section class="band">
+  <h2>Try it in a minute</h2>
+<pre><code class="sh">$ pip install brrrrr
+$ brrrrr-sql "SELECT symbol, count(*) AS trades, vwap(price, size) AS vwap
+    FROM 'https://raw.githubusercontent.com/aperiodic-io/monotile/main/fixtures/cookbook/trades.csv'
+    GROUP BY symbol"</code></pre>
+  <div class="btns">
+    <a class="btn primary" href="docs/index.html">Read the guide</a>
+    <a class="btn" href="https://github.com/aperiodic-io/monotile/discussions">Ask a question</a>
+  </div>
+</section>

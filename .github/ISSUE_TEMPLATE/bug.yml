@@ -1,0 +1,45 @@
+name: Bug
+description: A wrong answer, an error that should not be, a crash, or a slow query
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. A query we can run is what lets us fix it: the statement, and enough about the data to make some like it.
+  - type: input
+    id: version
+    attributes:
+      label: brrrrr version
+      description: "`brrrrr --version`, or `python -c 'import brrrrr; print(brrrrr.__version__)'`"
+      placeholder: brrrrr 0.1.0
+    validations: { required: true }
+  - type: dropdown
+    id: how
+    attributes:
+      label: How you ran it
+      options: [brrrrr sql or the shell, Python (pip), brrrrr serve (HTTP or PostgreSQL), brrrrr run (a pipeline), Docker image, other]
+    validations: { required: true }
+  - type: textarea
+    id: query
+    attributes:
+      label: The query
+      description: The SQL as you ran it (or the pipeline's SQL file).
+      render: sql
+    validations: { required: true }
+  - type: textarea
+    id: data
+    attributes:
+      label: The data's shape
+      description: "The columns and their types (`DESCRIBE 'file'` prints them), the format (Parquet, CSV, JSON), roughly how many rows, and where it lives (local, S3, ...). A few rows help most."
+    validations: { required: true }
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: The error or the output, and the answer you expected (from another engine, if you checked).
+    validations: { required: true }
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Linux x86_64, macOS arm64, Windows ...

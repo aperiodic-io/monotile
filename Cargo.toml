@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = ["crates/brrrrr-core", "crates/brrrrr-lake", "crates/brrrrr-py", "crates/brrrrr"]
+exclude = ["fuzz"] # nightly-only cargo-fuzz crate
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "Apache-2.0"
+repository = "https://github.com/aperiodic-io/monotile"
+homepage = "https://aperiodic-io.github.io/monotile/"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "allow"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+
+# Tests (and each cargo-mutants build) run the engine over every production pipeline: optimized,
+# the unit suite takes 11 s instead of 50 s, for about a minute more on a clean build.
+[profile.dev]
+opt-level = 1
+# Line tables keep file:line in backtraces and test failures; full debug info (variables, types)
+# made most of the target dir and of every link. Dependencies get none: their backtraces still
+# name functions. Linking: Rust 1.95 (rust-toolchain.toml) links x86_64 Linux with rust-lld by
+# default; locally, mold (~/.cargo/config.toml) is faster still. Give each worktree its own target
+# dir (CARGO_TARGET_DIR): cargo names a workspace member's artifacts by their path in the workspace,
+# so worktrees sharing one dir link each other's crates; RUSTC_WRAPPER=sccache still compiles
+# dependencies once (brrrrr#79).
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# Mutation testing (.cargo/mutants.toml): the workspace is rebuilt once per mutant, so no debug
+# info at all. opt-level stays 1: at 0 the full suite runs ~4x slower, which a surviving mutant pays.
+[profile.mutants]
+inherits = "dev"
+debug = false
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.bench]
+inherits = "release"
+
+# Fast to build, near release speed: the profiling loop (no LTO; the shipped binary keeps fat LTO).
+[profile.profiling]
+inherits = "release"
+lto = false
+codegen-units = 16

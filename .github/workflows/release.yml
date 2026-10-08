@@ -1,0 +1,113 @@
+name: release
+# A tag v<version> (the crates' version) releases brrrrr: the binaries for Linux and macOS on a
+# GitHub release, the Python wheels on PyPI, and the public image
+# ghcr.io/aperiodic-io/monotile:<version> and :latest (with `brrrrr sql` and `brrrrr serve`; the
+# live images of ci.yml leave them out). A dispatch, or a pull request that changes this workflow
+# or the Python package's build, builds and tests everything and publishes nothing.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: [.github/workflows/release.yml, crates/brrrrr-py/Cargo.toml, crates/brrrrr-py/pyproject.toml]
+  workflow_dispatch:
+permissions: { contents: read }
+env:
+  CARGO_TERM_COLOR: always
+  # a tag's version; a dry run's builds are named dev
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}
+
+jobs:
+  # Linux builds on every dry run; macOS and Windows for a release only
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(startsWith(github.ref, 'refs/tags/v') && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"},{"os":"macos-14","target":"aarch64-apple-darwin"},{"os":"macos-13","target":"x86_64-apple-darwin"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}]') }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: cargo build --release --locked -p brrrrr --target ${{ matrix.target }}
+      - run: |
+          dir=brrrrr-$VERSION-${{ matrix.target }}
+          mkdir "$dir" && cp target/${{ matrix.target }}/release/brrrrr LICENSE NOTICE README.md "$dir"
+          strip "$dir/brrrrr" || true
+          tar czf "$dir.tar.gz" "$dir"
+          shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256"
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: "bin-${{ matrix.target }}", path: "brrrrr-*.tar.gz*", if-no-files-found: error }
+
+  wheels:
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(startsWith(github.ref, 'refs/tags/v') && '[{"os":"ubuntu-latest","target":"x86_64","manylinux":"2_28"},{"os":"ubuntu-24.04-arm","target":"aarch64","manylinux":"2_28"},{"os":"macos-14","target":"aarch64"},{"os":"macos-13","target":"x86_64"},{"os":"windows-2022","target":"x64"}]' || '[{"os":"ubuntu-latest","target":"x86_64","manylinux":"2_28"},{"os":"ubuntu-24.04-arm","target":"aarch64","manylinux":"2_28"}]') }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with: { python-version: "3.12" }
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          working-directory: crates/brrrrr-py
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --locked --out dist
+      # the wheel works: installed with its extras, the package's own tests pass
+      - shell: bash
+        run: |
+          pip install crates/brrrrr-py/dist/*.whl pytest pyarrow pandas polars
+          cd crates/brrrrr-py/tests && pytest -q
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: "wheel-${{ matrix.os }}-${{ matrix.target }}", path: crates/brrrrr-py/dist/*.whl, if-no-files-found: error }
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with: { working-directory: crates/brrrrr-py, command: sdist, args: --out dist }
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: sdist, path: crates/brrrrr-py/dist/*.tar.gz, if-no-files-found: error }
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [binaries, wheels, sdist]
+    runs-on: ubuntu-latest
+    # contents: the GitHub release; id-token: PyPI's trusted publishing (the project trusts this
+    # workflow, so no token is stored)
+    permissions: { contents: write, id-token: write }
+    environment: pypi
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { path: out, merge-multiple: true }
+      - run: gh release create "${{ github.ref_name }}" out/brrrrr-* --generate-notes --verify-tag
+        env: { GH_TOKEN: "${{ github.token }}" }
+      - run: mkdir pypi && mv out/*.whl out/*.tar.gz pypi/ && rm -f pypi/brrrrr-v*
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with: { packages-dir: pypi }
+
+  image:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          build-args: |
+            CARGO_ARGS=
+            FEATURES=object-store
+          push: true
+          tags: |
+            ghcr.io/aperiodic-io/monotile:${{ github.ref_name }}
+            ghcr.io/aperiodic-io/monotile:latest
+          cache-from: type=gha,scope=image-public
+          cache-to: type=gha,scope=image-public,mode=max,ignore-error=true

@@ -1,0 +1,45 @@
+<!-- title: FAQ · brrrrr | description: Common questions about brrrrr: maturity, data sizes, memory, time zones and precision, platforms, licence, and how it relates to kdb+, DuckDB and QuestDB. -->
+<p class="eyebrow">FAQ</p>
+<h1>Questions</h1>
+
+<details open><summary>How mature is it?</summary>
+<p>The streaming engine and <code>brrrrr run</code> are the oldest and most tested parts: exactly-once from Kafka to Kafka, with checkpoints that survive <code>kill -9</code>, checked by crash tests on every change. The SQL shell, the Python package and the server are newer; their interfaces may still change before 1.0. What comes next is in the <a href="https://github.com/aperiodic-io/monotile/blob/main/docs/ROADMAP.md">roadmap</a>.</p></details>
+
+<details><summary>Do I need to run a server?</summary>
+<p>No. <code>brrrrr sql</code> and the Python package query files and object stores directly, in your process. Run <code>brrrrr serve</code> only for live tables, live views, subscriptions or the PostgreSQL protocol.</p></details>
+
+<details><summary>How much data can it handle?</summary>
+<p>Queries stream through tables in time order, so memory follows the number of open groups (symbols times open buckets), not the size of the data. A year of trades in Parquet is fine on a laptop. Sorting a table that is not in time order, and exact percentiles over very large groups, hold their values in memory.</p></details>
+
+<details><summary>What about time zones?</summary>
+<p>Times are stored and compared in UTC. Bucket by another zone's days or hours with <code>time_bucket('1 day', ts, 'America/New_York')</code>, and show local times with <code>timezone('Europe/London', ts)</code> or <code>ts AT TIME ZONE 'Asia/Tokyo'</code>. Daylight saving is exact: a New York day in March has 23 hours. The time zone database is built in, so answers are the same on every machine.</p></details>
+
+<details><summary>What precision are timestamps?</summary>
+<p>Microseconds. Nanosecond timestamps are read to the microsecond.</p></details>
+
+<details><summary>Which platforms?</summary>
+<p>Linux and macOS (x86-64 and ARM) for the binary; Linux, macOS and Windows wheels for Python; and a Docker image.</p></details>
+
+<details><summary>Why are some queries refused?</summary>
+<p>Every query becomes a pipeline that could also run live, over a stream that only moves forward. A few shapes need the whole table first (a whole-partition window total, <code>lead</code>, a full outer join). brrrrr refuses them and says what to write instead, rather than running something different. <a href="sql.html#refused">The list.</a></p></details>
+
+<details><summary>Is it faster than DuckDB?</summary>
+<p>On time-shaped queries (bars, VWAP, as-of joins per symbol, rolling windows), yes. On plain scans and group-bys DuckDB is faster today. <a href="../benchmarks.html">The numbers.</a></p></details>
+
+<details><summary>Can I use it with DuckDB, Polars or pandas?</summary>
+<p>Yes. They read the Parquet brrrrr writes, and in Python results go to Polars, pandas and pyarrow, and DataFrames are tables by their names.</p></details>
+
+<details><summary>Does it replace kdb+?</summary>
+<p>For many tick-data workloads: bars, as-of joins, an RDB and HDB in one process, subscriptions. Not for q itself, or the kdb+ ecosystem. <a href="from-kdb.html">Coming from kdb+.</a></p></details>
+
+<details><summary>Does it send telemetry?</summary>
+<p>No. brrrrr makes no network calls except to the files, object stores and brokers you name.</p></details>
+
+<details><summary>What is the licence?</summary>
+<p>Apache-2.0: free to use, change and ship, commercially too.</p></details>
+
+<details><summary>Why the name?</summary>
+<p>Cold storage, hot queries. And what the money printer says.</p></details>
+
+<details><summary>How do I get help or contribute?</summary>
+<p>Ask in <a href="https://github.com/aperiodic-io/monotile/discussions">Discussions</a>, report bugs in <a href="https://github.com/aperiodic-io/monotile/issues">Issues</a>, and read <a href="https://github.com/aperiodic-io/monotile/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a> to send a change. Recipes for the cookbook are especially welcome.</p></details>

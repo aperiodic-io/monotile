@@ -1,0 +1,20 @@
+const { Client } = require('pg');
+(async () => {
+  const c = new Client({ host: '127.0.0.1', port: 5433, user: 'brrrrr', database: 'brrrrr', password: process.argv[2] });
+  const out = [];
+  const check = async (name, f) => { try { out.push(['ok', name, JSON.stringify(await f()).slice(0, 200)]); } catch (e) { out.push(['FAIL', name, String(e.message).slice(0, 300)]); } };
+  await check('connect', () => c.connect().then(() => 'connected'));
+  await check('simple', async () => (await c.query('SELECT * FROM bars ORDER BY minute, symbol LIMIT 2')).rows);
+  await check('types', async () => { const r = (await c.query('SELECT minute, symbol, open, volume FROM bars LIMIT 1')).rows[0]; return Object.values(r).map(v => v === null ? 'null' : (v instanceof Date ? 'Date' : typeof v)); });
+  await check('param text', async () => (await c.query('SELECT count(*) AS n FROM trades WHERE symbol = $1', ['BTC'])).rows);
+  await check('param int', async () => (await c.query('SELECT symbol, price FROM trades WHERE size > $1 LIMIT 2', [0])).rows);
+  await check('param float', async () => (await c.query('SELECT count(*) AS n FROM trades WHERE price > $1', [101.5])).rows);
+  await check('param timestamp', async () => (await c.query('SELECT count(*) AS n FROM trades WHERE ts >= $1', [new Date(Date.UTC(2024, 0, 2, 9, 35))])).rows);
+  await check('null', async () => (await c.query('SELECT NULL AS n, 1 AS one')).rows);
+  await check('error', async () => (await c.query('SELECT nope FROM trades')).rows);
+  await check('after error', async () => (await c.query('SELECT 1 AS one')).rows);
+  await check('named prepared', async () => (await c.query({ name: 'q1', text: 'SELECT count(*) AS n FROM trades WHERE symbol = $1', values: ['ETH'] })).rows);
+  await check('named prepared again', async () => (await c.query({ name: 'q1', text: 'SELECT count(*) AS n FROM trades WHERE symbol = $1', values: ['SOL'] })).rows);
+  await c.end();
+  for (const r of out) console.log(r.join(' | '));
+})();

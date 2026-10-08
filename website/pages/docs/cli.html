@@ -1,0 +1,48 @@
+<!-- title: Command line · brrrrr | description: brrrrr sql, the SQL shell and one-shot query runner: arguments, output formats, files, standard input and the shell's commands. -->
+<p class="eyebrow">Reference</p>
+<h1>Command line</h1>
+<p class="lede"><code>brrrrr</code> on its own opens the SQL shell. <code>brrrrr sql</code> runs statements from its argument, a file or standard input. <code>brrrrr serve</code> and <code>brrrrr run</code> are the <a href="server.html">server</a> and <a href="streaming.html">pipelines</a>.</p>
+
+<h2 id="sql">brrrrr sql</h2>
+<pre><code class="sh">$ brrrrr sql "SELECT count(*) FROM 'trades.parquet'"     # one statement
+$ brrrrr sql -f report.sql                               # statements from a file
+$ cat report.sql | brrrrr sql                            # or from standard input
+$ brrrrr sql                                             # the shell</code></pre>
+<div class="tbl"><table>
+<thead><tr><th>Option</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>-f, --file FILE</code></td><td>Runs the statements of a file, <code>;</code>-separated.</td></tr>
+<tr><td><code>-t, --table NAME=LOCATION</code></td><td>Names a location as a table, as often as needed: <code>-t trades=s3://b/trades/ -t quotes=quotes/*.parquet</code>.</td></tr>
+<tr><td><code>--format table|csv|json|parquet</code></td><td>How results are written. A table on a terminal, CSV into a pipe or file. <code>json</code> is one object per line.</td></tr>
+<tr><td><code>-o, --output PATH</code></td><td>Writes the last statement's result to a file or object store, its format from its name.</td></tr>
+<tr><td><code>--threads N</code></td><td>Threads per query; every CPU's by default.</td></tr>
+<tr><td><code>--max-rows N</code></td><td>Rows a table shows at most (its first and last halves); 40 by default.</td></tr>
+</tbody></table></div>
+<p>A failing statement prints its reason on standard error and the command exits with status 1, so scripts and CI stop on errors.</p>
+
+<h2 id="pipes">In pipes</h2>
+<pre><code class="sh">$ brrrrr sql "SELECT * FROM 'trades.parquet' WHERE symbol = 'BTC'" | head
+$ brrrrr sql --format json "FROM 'events.jsonl' LIMIT 3" | jq .
+$ brrrrr sql --format parquet "FROM 'big.csv.gz'" &gt; big.parquet</code></pre>
+
+<h2 id="shell">The shell</h2>
+<p>Statements end with <code>;</code> and may span lines: Enter before the <code>;</code> goes on to the next line, and the arrows edit the whole statement. <kbd>Tab</kbd> completes keywords, functions, tables and views, the columns of the tables a statement names, and inside quotes the data files and directories of the working directory. <kbd>Ctrl</kbd>+<kbd>C</kbd> stops a running query (the shell stays); on a line being typed, it clears it. History is kept in <code>~/.brrrrr_history</code>.</p>
+<div class="tbl"><table>
+<thead><tr><th>Command</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>.tables</code></td><td>Lists the tables and views named so far.</td></tr>
+<tr><td><code>.mode table|csv|json</code></td><td>How results are shown.</td></tr>
+<tr><td><code>.timer on|off</code></td><td>Shows each statement's time (on).</td></tr>
+<tr><td><code>.read FILE</code></td><td>Runs the statements of a file.</td></tr>
+<tr><td><code>.rows N</code></td><td>Rows a table shows at most.</td></tr>
+<tr><td><code>.help</code>, <code>.quit</code></td><td>Help; leave (also Ctrl-D).</td></tr>
+</tbody></table></div>
+
+<h2 id="env">Environment</h2>
+<div class="tbl"><table>
+<thead><tr><th>Variable</th><th>For</th></tr></thead>
+<tbody>
+<tr><td><code>AWS_*</code>, <code>GOOGLE_*</code>, <code>AZURE_*</code></td><td>Object store credentials (<a href="files.html#credentials">details</a>).</td></tr>
+<tr><td><code>BRRRRR_CACHE</code></td><td>Where downloaded files are cached.</td></tr>
+<tr><td><code>BRRRRR_DATA</code>, <code>BRRRRR_HTTP</code>, <code>BRRRRR_PG</code>, <code>BRRRRR_TOKEN</code>, <code>BRRRRR_KAFKA</code></td><td>The server's settings (<a href="server.html#options">details</a>).</td></tr>
+</tbody></table></div>

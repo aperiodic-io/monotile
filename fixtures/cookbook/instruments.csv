@@ -1,0 +1,5 @@
+symbol,name,tick_size,sector
+BTC,Bitcoin,0.1,L1
+ETH,Ether,0.01,L1
+SOL,Solana,0.001,L1
+DOGE,Dogecoin,1e-05,meme

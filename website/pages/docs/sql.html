@@ -1,0 +1,127 @@
+<!-- title: SQL reference · brrrrr | description: The statements, clauses, aggregates, window functions and scalar functions brrrrr runs, the spellings it accepts from DuckDB, TimescaleDB, Snowflake and kdb+, and what it refuses. -->
+<p class="eyebrow">Reference</p>
+<h1>SQL</h1>
+<p class="lede">brrrrr speaks the SQL of DuckDB and PostgreSQL, plus the time-series vocabulary of TimescaleDB, QuestDB and kdb+. What it cannot run, it refuses with the reason and what to write instead; it never runs a query as something else.</p>
+
+<h2 id="statements">Statements</h2>
+<div class="tbl"><table>
+<thead><tr><th>Statement</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>SELECT …</code></td><td>A query. <code>FROM 'trades.parquet'</code> alone is <code>SELECT *</code>; <code>SELECT 1 + 1</code> without <code>FROM</code> evaluates once.</td></tr>
+<tr><td><code>CREATE TABLE name AS 'location'</code></td><td>Names a file, glob, directory or URL as a table for the session.</td></tr>
+<tr><td><code>CREATE [OR REPLACE] VIEW name AS query</code></td><td>Names a query; it reads as a table.</td></tr>
+<tr><td><code>CREATE LIVE VIEW name AS query</code></td><td>On a server: the query's answer kept up to date as rows arrive (<a href="server.html#live-views">live views</a>).</td></tr>
+<tr><td><code>COPY (query) TO 'destination' [(FORMAT parquet|csv|json)]</code></td><td>Writes a result to a file or an object store; the format from the name unless given.</td></tr>
+<tr><td><code>DESCRIBE table | 'file' | query</code></td><td>Columns and their types.</td></tr>
+<tr><td><code>SHOW TABLES</code></td><td>The tables and views named so far.</td></tr>
+<tr><td><code>EXPLAIN query</code></td><td>The pipeline of views the query becomes, as the live engine would run it.</td></tr>
+<tr><td><code>DROP VIEW name</code>, <code>DROP TABLE name</code></td><td>Forgets a name (never deletes files).</td></tr>
+</tbody></table></div>
+
+<h2 id="tables">Tables</h2>
+<p>A table is a file, a glob, a directory or a URL in single quotes, a name given with <code>CREATE TABLE</code> or <code>--table</code>, a view, a live table on a server, or a DataFrame in Python. A bare name with a file of that name in the working directory (<code>trades.parquet</code>, <code>trades.csv</code>…) finds it.</p>
+<pre><code class="sql">FROM 'trades.parquet';
+FROM 'data/2024-*/trades.csv.gz';
+FROM 's3://bucket/trades/';                   -- a directory of Hive partitions: date=2024-01-02/…
+FROM read_csv('export.txt', delim = '|');     -- the format of a file named otherwise
+FROM read_parquet('s3://bucket/part-0001');</code></pre>
+<p>See <a href="files.html">Files and object stores</a> for formats, schema inference and credentials.</p>
+
+<h2 id="clauses">Clauses</h2>
+<ul>
+<li><code>WHERE</code>, <code>GROUP BY</code> (by name, position or expression), <code>HAVING</code>, <code>ORDER BY</code>, <code>LIMIT</code>, <code>OFFSET</code>, <code>DISTINCT</code>.</li>
+<li><code>WITH</code> (CTEs), subqueries in <code>FROM</code>, <code>UNION</code> and <code>UNION ALL</code> (the rows of both tables in time order).</li>
+<li><code>[LEFT] JOIN … ON keys</code>: a lookup of the right table by key, as with reference data. Each left row meets at most one right row. The right side may be a table, a subquery, a CTE or a view: it runs first, so each row can meet its group's aggregate (<a href="cookbook.html#large_trades">an example</a>).</li>
+<li><code>ASOF [LEFT] JOIN … ON keys AND left.ts &gt;= right.ts</code>: each left row with the last right row of its keys at or before it. Snowflake's <code>MATCH_CONDITION (left.ts &gt;= right.ts)</code> works too. Also:
+<ul>
+<li>at a time offset, a markout: <code>left.ts + INTERVAL '5 seconds' &gt;= right.ts</code>, the quote 5 seconds after each trade (or <code>- INTERVAL</code>, before). Join the same table once per horizon (<a href="cookbook.html#markouts">an example</a>);</li>
+<li>strictly before: <code>left.ts &gt; right.ts</code>;</li>
+<li>with a tolerance: <code>AND left.ts - right.ts &lt;= INTERVAL '1 second'</code>: an older row is no match (<code>NULL</code>s in <code>ASOF LEFT JOIN</code>, the row left out in <code>ASOF JOIN</code>), as QuestDB's <code>TOLERANCE</code>.</li>
+</ul></li>
+<li>Window joins (kdb+'s <code>wj</code>, QuestDB's <code>WINDOW JOIN</code>): <code>LEFT JOIN LATERAL (SELECT aggregates FROM quotes q WHERE q.symbol = t.symbol AND q.ts BETWEEN t.ts - INTERVAL '1 second' AND t.ts) w ON true</code>, or <code>FROM t, LATERAL (…)</code>: for each left row, aggregates over the right rows of its key in a time range around it, either end strict (<code>&gt;</code>, <code>&lt;</code>) or not, and in the future too (<code>AND t.ts + INTERVAL '5 seconds'</code>). Over no rows, <code>count</code> is 0 and the others <code>NULL</code> (<a href="cookbook.html#quotes_before_trades">an example</a>). A query, not a live view.</li>
+<li><code>PIVOT</code>: a column's values as columns, for research tables (symbols side by side). DuckDB's statement, <code>PIVOT trades ON symbol [IN ('BTC', 'ETH')] USING last(price, ts) GROUP BY time_bucket('1m', ts)</code>, or SQL's <code>FROM t PIVOT (agg [AS name], … FOR col IN (values | ANY))</code>, which groups by every other column. Without <code>IN</code>, the values are found first (<a href="cookbook.html#pivot_closes">an example</a>). <code>UNPIVOT (value FOR name IN (columns))</code> turns columns back into rows.</li>
+<li>Window functions with <code>OVER (PARTITION BY … ORDER BY ts [ROWS | RANGE BETWEEN …])</code> and named windows (<code>WINDOW w AS (…)</code>).</li>
+<li><code>agg(x) FILTER (WHERE condition)</code> on any aggregate.</li>
+</ul>
+
+<h2 id="time">Time</h2>
+<p>Times are timestamps in UTC with microseconds. Text in a time column (<code>'2024-01-02 09:30:00'</code>, ISO 8601 with <code>T</code> or <code>Z</code>) compares as a time.</p>
+<div class="tbl"><table>
+<thead><tr><th>Function</th><th>Gives</th></tr></thead>
+<tbody>
+<tr><td><code>time_bucket(width, ts)</code>, <code>date_bin(width, ts)</code></td><td>The start of <code>ts</code>'s bucket. Widths: <code>'250ms'</code>, <code>'1s'</code>, <code>'1m'</code>, <code>'5 minutes'</code>, <code>'1h'</code>, <code>'1d'</code>, <code>INTERVAL '15 minutes'</code>. <code>GROUP BY</code> a bucket is a tumbling window.</td></tr>
+<tr><td><code>time_bucket(width, ts, 'America/New_York')</code></td><td>The bucket of a time zone's wall clock, as a UTC time: a day from local midnight, 23 or 25 hours long where the clocks change (DuckDB's and TimescaleDB's third argument). Live, a bucket narrower than an hour closes an hour late: the clock goes back an hour when DST ends.</td></tr>
+<tr><td><code>time_bucket_gapfill(width, ts [, start, finish])</code></td><td>In <code>GROUP BY</code>: every bucket from each group's first to its last (or over <code>start</code> … <code>finish</code>), its aggregates <code>NULL</code> where it had no row. <code>locf(agg)</code> carries the last value forward, <code>interpolate(agg)</code> draws a line; <code>coalesce(sum(size), 0)</code> makes an empty bucket's volume 0 (TimescaleDB's). Live, a gap is filled when its group's next bucket closes (<a href="cookbook.html#gapfill_bars">an example</a>).</td></tr>
+<tr><td><code>timezone('Europe/London', ts)</code>, <code>ts AT TIME ZONE 'Europe/London'</code></td><td>The time on that zone's wall clock (times are UTC, as a <code>TIMESTAMPTZ</code> is in PostgreSQL and DuckDB). Zones are IANA names, from a time zone database built in.</td></tr>
+<tr><td><code>date_trunc(unit, ts)</code></td><td><code>ts</code> cut to the microsecond … second, minute, hour, day, week (Monday), month, quarter or year.</td></tr>
+<tr><td><code>date_part(unit, ts)</code>, <code>extract(unit FROM ts)</code>, <code>year(ts)</code> … <code>second(ts)</code>, <code>dayofweek</code>, <code>isodow</code>, <code>dayofyear</code>, <code>week</code>, <code>epoch</code></td><td>A part of a time as a number.</td></tr>
+<tr><td><code>ts ± INTERVAL '1 hour'</code>, <code>ts1 - ts2</code></td><td>Time arithmetic; the difference of two times is an interval.</td></tr>
+<tr><td><code>date_diff(unit, a, b)</code></td><td>Whole units from <code>a</code> to <code>b</code>.</td></tr>
+<tr><td><code>epoch_ms(ts)</code>, <code>epoch_us(ts)</code>, <code>epoch_ns(ts)</code>, <code>to_timestamp(seconds)</code></td><td>Unix times, both ways.</td></tr>
+<tr><td><code>strftime(ts, '%Y-%m-%d %H:%M')</code></td><td>A time as text.</td></tr>
+<tr><td><code>now()</code>, <code>TIMESTAMP '…'</code>, <code>CAST(x AS TIMESTAMP)</code></td><td>Literals and conversions.</td></tr>
+</tbody></table></div>
+
+<h2 id="aggregates">Aggregates</h2>
+<div class="tbl"><table>
+<thead><tr><th>Aggregate</th><th>Gives</th></tr></thead>
+<tbody>
+<tr><td><code>count(*)</code>, <code>count(x)</code>, <code>count_if(cond)</code>, <code>count(DISTINCT x)</code></td><td>Rows; non-null values; rows where <code>cond</code>; distinct non-null values (exact, as is <code>approx_count_distinct</code>).</td></tr>
+<tr><td><code>sum</code>, <code>avg</code> (<code>mean</code>), <code>min</code>, <code>max</code></td><td>As usual. Over doubles, like any engine, the last digits may vary with how many threads ran the query.</td></tr>
+<tr><td><code>first(x, ts)</code>, <code>last(x, ts)</code></td><td><code>x</code> at the earliest and latest <code>ts</code>: open and close. Also <code>arg_min</code>/<code>min_by</code>, <code>arg_max</code>/<code>max_by</code>.</td></tr>
+<tr><td><code>vwap(price, size)</code>, <code>weighted_avg(x, w)</code></td><td>Volume-weighted average price.</td></tr>
+<tr><td><code>twap(price, ts)</code></td><td>Time-weighted average: each price held until the next.</td></tr>
+<tr><td><code>median(x)</code>, <code>quantile_cont(x, p)</code>, <code>percentile_cont(p) WITHIN GROUP (ORDER BY x)</code></td><td>Exact percentiles however many rows, interpolated as DuckDB and PostgreSQL do.</td></tr>
+<tr><td><code>approx_quantile(x, p)</code></td><td>A percentile from a sample, in bounded memory.</td></tr>
+<tr><td><code>stddev</code> (<code>stddev_samp</code>), <code>variance</code> (<code>var_samp</code>, <code>var</code>), <code>skewness</code>, <code>kurtosis</code>, <code>kurtosis_pop</code>, <code>corr(x, y)</code></td><td>Spread and shape.</td></tr>
+<tr><td><code>agg(x) FILTER (WHERE cond)</code>, <code>sum_if(x, cond)</code></td><td>Any aggregate over the rows where <code>cond</code>.</td></tr>
+</tbody></table></div>
+
+<h2 id="windows">Window functions</h2>
+<p>Ordered by a table's time, partitioned by any keys. A frame is <code>ROWS BETWEEN n PRECEDING AND CURRENT ROW</code> or <code>RANGE BETWEEN INTERVAL '5 minutes' PRECEDING AND CURRENT ROW</code>; without one, every row so far.</p>
+<div class="tbl"><table>
+<thead><tr><th>Function</th><th>Gives</th></tr></thead>
+<tbody>
+<tr><td><code>lag(x [, n [, default]])</code></td><td><code>x</code> of the row <code>n</code> before.</td></tr>
+<tr><td><code>lead(x [, n [, default]])</code></td><td><code>x</code> of the row <code>n</code> after: the time to the next trade, the next price (<a href="cookbook.html#next_trade">an example</a>). A row comes out when its partition's next rows come in, so its rows are out of time order; a live view emits a row once its next one arrives. The calls of one SELECT share one <code>PARTITION BY</code>.</td></tr>
+<tr><td><code>row_number()</code></td><td>1, 2, 3… within the partition.</td></tr>
+<tr><td><code>first_value(x)</code>, <code>last_value(x)</code></td><td>The frame's first and last.</td></tr>
+<tr><td><code>sum</code>, <code>avg</code>, <code>min</code>, <code>max</code>, <code>count</code>, <code>vwap</code>, <code>stddev</code>, … <code>OVER (…)</code></td><td>Running and rolling aggregates: every aggregate above.</td></tr>
+<tr><td><code>ema(x, period) OVER (…)</code>, <code>ema(x, alpha) OVER (…)</code></td><td>Exponential moving average: a period of 1 or more, or a smoothing factor below 1.</td></tr>
+</tbody></table></div>
+<pre><code class="sql">SELECT ts, symbol, price,
+       avg(price) OVER w20 AS sma20,
+       ema(price, 20) OVER w AS ema20,
+       price / lag(price) OVER w - 1 AS ret
+FROM 'trades.parquet'
+WINDOW w AS (PARTITION BY symbol ORDER BY ts),
+       w20 AS (PARTITION BY symbol ORDER BY ts ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)</code></pre>
+
+<h2 id="scalars">Scalar functions</h2>
+<div class="tbl"><table>
+<thead><tr><th>Kind</th><th>Functions</th></tr></thead>
+<tbody>
+<tr><td>Math</td><td><code>abs</code>, <code>round(x, d)</code>, <code>floor</code>, <code>ceil</code>, <code>trunc</code>, <code>sign</code>, <code>sqrt</code>, <code>exp</code>, <code>ln</code>, <code>log(b, x)</code>, <code>power</code>, <code>greatest</code>, <code>least</code>, <code>%</code></td></tr>
+<tr><td>Conditional</td><td><code>CASE</code>, <code>coalesce</code>, <code>nullif</code>, <code>ifnull</code>, <code>if(c, a, b)</code>, <code>IS [NOT] NULL</code>, <code>IN (…)</code>, <code>BETWEEN</code></td></tr>
+<tr><td>Text</td><td><code>||</code>, <code>concat</code>, <code>concat_ws</code>, <code>lower</code>, <code>upper</code>, <code>trim</code>, <code>ltrim</code>, <code>rtrim</code>, <code>length</code>, <code>substr</code>, <code>left</code>, <code>right</code>, <code>replace</code>, <code>split_part</code>, <code>lpad</code>, <code>rpad</code>, <code>repeat</code>, <code>reverse</code>, <code>starts_with</code>, <code>ends_with</code>, <code>contains</code>, <code>strpos</code></td></tr>
+<tr><td>Patterns</td><td><code>LIKE</code>, <code>ILIKE</code>, <code>regexp_matches</code>, <code>regexp_extract</code>, <code>regexp_replace</code></td></tr>
+<tr><td>Types</td><td><code>CAST(x AS DOUBLE | BIGINT | UBIGINT | VARCHAR | BOOLEAN | TIMESTAMP)</code>, <code>x::DOUBLE</code></td></tr>
+</tbody></table></div>
+
+<h2 id="types">Types</h2>
+<p>Columns are 64-bit integers (signed and unsigned), doubles, text, booleans and timestamps. Parquet's narrower integers and floats widen to these; decimals read as doubles; dates read as timestamps at midnight.</p>
+
+<h2 id="refused">What brrrrr refuses, and what to write instead</h2>
+<p>brrrrr runs every query as a pipeline that could also run live. A few shapes do not fit; each is refused with the fix.</p>
+<div class="tbl"><table>
+<thead><tr><th>You wrote</th><th>Write instead</th></tr></thead>
+<tbody>
+<tr><td><code>FROM a, b</code></td><td>a <code>JOIN … ON</code>.</td></tr>
+<tr><td><code>sum(DISTINCT x)</code>, <code>avg(DISTINCT x)</code></td><td>The aggregate over a <code>SELECT DISTINCT</code> subquery.</td></tr>
+<tr><td><code>LIMIT</code> or <code>ORDER BY</code> inside a subquery</td><td>Limit and order the outermost query.</td></tr>
+<tr><td><code>sum(x) OVER (PARTITION BY k)</code> without <code>ORDER BY</code></td><td>A <code>GROUP BY k</code> joined back, or a running total ordered by time.</td></tr>
+<tr><td><code>rank()</code></td><td><code>row_number()</code>.</td></tr>
+<tr><td><code>lead(x)</code> under a time operation (<code>time_bucket</code>, an as-of join, a window function by time)</td><td><code>lead</code> in the outermost query, or <code>lag</code> the other way: <code>lead</code>'s rows come out of time order.</td></tr>
+<tr><td>A <code>FULL</code> or <code>RIGHT</code> join, or a join matching many rows to many</td><td>Join the other way round, or aggregate one side first.</td></tr>
+</tbody></table></div>
+<p>Missing something you need? <a href="https://github.com/aperiodic-io/monotile/issues/new">Open an issue</a> with the query.</p>

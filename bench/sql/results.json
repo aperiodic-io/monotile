@@ -1,0 +1,133 @@
+{
+ "threads": 8,
+ "reps": 3,
+ "engines": [
+  {
+   "id": "brrrrr",
+   "name": "brrrrr"
+  },
+  {
+   "id": "duckdb",
+   "name": "DuckDB 1.5.5"
+  }
+ ],
+ "queries": [
+  {
+   "name": "count",
+   "sql": "SELECT count(*) AS n FROM '/data/trades.parquet'",
+   "rows": 1,
+   "s": {
+    "brrrrr": 0.112,
+    "duckdb": 0.215
+   },
+   "mib": {
+    "brrrrr": 22,
+    "duckdb": 53
+   }
+  },
+  {
+   "name": "per_symbol",
+   "sql": "SELECT symbol, count(*) AS n, sum(size) AS volume, avg(price) AS avg_price, max(price) AS high FROM '/data/trades.parquet' GROUP BY symbol ORDER BY volume DESC LIMIT 10",
+   "rows": 10,
+   "s": {
+    "brrrrr": 0.349,
+    "duckdb": 0.333
+   },
+   "mib": {
+    "brrrrr": 310,
+    "duckdb": 102
+   }
+  },
+  {
+   "name": "ohlcv_1m",
+   "sql": "SELECT time_bucket('1m', ts) AS minute, symbol, first(price, ts) AS open, max(price) AS high, min(price) AS low, last(price, ts) AS close, sum(size) AS volume FROM '/data/trades.parquet' GROUP BY minute, symbol ORDER BY minute, symbol LIMIT 5",
+   "rows": 5,
+   "s": {
+    "brrrrr": 0.528,
+    "duckdb": 0.827
+   },
+   "mib": {
+    "brrrrr": 388,
+    "duckdb": 127
+   }
+  },
+  {
+   "name": "vwap_1h",
+   "sql": "SELECT time_bucket('1h', ts) AS hour, symbol, sum(price * size) / sum(size) AS vwap FROM '/data/trades.parquet' GROUP BY hour, symbol ORDER BY hour, symbol LIMIT 5",
+   "rows": 5,
+   "s": {
+    "brrrrr": 0.389,
+    "duckdb": 0.646
+   },
+   "mib": {
+    "brrrrr": 366,
+    "duckdb": 113
+   }
+  },
+  {
+   "name": "filter_buys",
+   "sql": "SELECT symbol, count(*) AS n FROM '/data/trades.parquet' WHERE side = 'buy' AND size > 10 GROUP BY symbol ORDER BY n DESC LIMIT 5",
+   "rows": 5,
+   "s": {
+    "brrrrr": 0.321,
+    "duckdb": 0.247
+   },
+   "mib": {
+    "brrrrr": 296,
+    "duckdb": 76
+   }
+  },
+  {
+   "name": "spread_bps",
+   "sql": "SELECT symbol, avg((ask - bid) / ((ask + bid) / 2)) * 10000 AS spread_bps FROM '/data/quotes.parquet' GROUP BY symbol ORDER BY spread_bps DESC LIMIT 5",
+   "rows": 5,
+   "s": {
+    "brrrrr": 0.527,
+    "duckdb": 0.393
+   },
+   "mib": {
+    "brrrrr": 425,
+    "duckdb": 126
+   }
+  },
+  {
+   "name": "asof_trades_quotes",
+   "sql": "SELECT count(*) AS n, avg(t.price - (q.bid + q.ask) / 2) AS avg_vs_mid FROM '/data/trades.parquet' t ASOF JOIN '/data/quotes.parquet' q ON t.symbol = q.symbol AND t.ts >= q.ts",
+   "rows": 1,
+   "s": {
+    "brrrrr": 3.2,
+    "duckdb": 1.922
+   },
+   "mib": {
+    "brrrrr": 830,
+    "duckdb": 3037
+   }
+  },
+  {
+   "name": "tca_per_symbol",
+   "sql": "SELECT t.symbol, count(*) AS n, avg(t.price - (q.bid + q.ask) / 2) AS avg_vs_mid FROM '/data/trades.parquet' t ASOF JOIN '/data/quotes.parquet' q ON t.symbol = q.symbol AND t.ts >= q.ts GROUP BY t.symbol ORDER BY n DESC LIMIT 5",
+   "rows": 5,
+   "s": {
+    "brrrrr": 1.657,
+    "duckdb": 2.029
+   },
+   "mib": {
+    "brrrrr": 1381,
+    "duckdb": 2979
+   }
+  },
+  {
+   "name": "rolling_return",
+   "sql": "SELECT symbol, avg(r) AS mean_return FROM (SELECT symbol, price / lag(price) OVER (PARTITION BY symbol ORDER BY ts) - 1 AS r FROM '/data/trades.parquet') GROUP BY symbol ORDER BY symbol LIMIT 5",
+   "rows": 5,
+   "s": {
+    "brrrrr": 0.742,
+    "duckdb": 0.807
+   },
+   "mib": {
+    "brrrrr": 318,
+    "duckdb": 814
+   }
+  }
+ ]
+}

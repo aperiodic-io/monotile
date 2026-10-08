@@ -1,0 +1,36 @@
+[package]
+name = "brrrrr-py"
+description = "brrrrr for Python: SQL for tick data over files, object stores and DataFrames."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+# The workspace's lints but for `unsafe`: this crate is the Arrow C boundary with Python, where
+# a stream is handed over as a raw pointer (the Arrow PyCapsule interface). Nothing else here
+# needs it.
+[lints.rust]
+missing_debug_implementations = "allow"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[lib]
+name = "_brrrrr"
+crate-type = ["cdylib"]
+# tested from Python (tests/, pytest): a Rust test binary would link libpython
+test = false
+doctest = false
+
+[dependencies]
+anyhow = "1"
+arrow-array = { version = "60", features = ["ffi"] }
+arrow-schema = "60"
+brrrrr-core = { path = "../brrrrr-core" }
+brrrrr-lake = { path = "../brrrrr-lake" }
+pyo3 = { version = "0.29", features = ["abi3-py39"] }
+
+[features]
+# the module's symbols are Python's own, found when Python loads it: nothing links libpython
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]

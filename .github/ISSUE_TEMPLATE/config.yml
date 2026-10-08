@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/aperiodic-io/monotile/discussions
+    about: How to write a query, what brrrrr fits, what is coming. Ask in Discussions.
+  - name: A security problem
+    url: https://github.com/aperiodic-io/monotile/blob/main/SECURITY.md
+    about: Report it privately, as SECURITY.md says, not in an issue.

@@ -1,0 +1,58 @@
+[package]
+name = "brrrrr-core"
+description = "Pure engine: SQL, expressions, aggregates, order book, formats. No I/O, no threads."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+autotests = false
+
+[lints]
+workspace = true
+
+[dependencies]
+regex = "1"
+sqlparser = { version = "0.63", features = ["visitor"] }
+ryu = "1.0.23"
+itoa = "1.0.18"
+rustc-hash = "2"
+serde = { version = "1", features = ["derive", "rc"] }
+postcard = { version = "1", features = ["alloc"] }
+zstd = { version = "0.13", default-features = false }
+# time zones: the tz database bundled, so a query gives the same answer on every machine
+jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
+
+[dev-dependencies]
+proptest = "1.11"
+prost = "0.14"
+flate2 = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
+gungraun = "0.19.4"
+stats_alloc = "0.1"
+peak_alloc = "0.3"
+serde-reflection = "0.6.0"
+base64 = "0.22"
+rustix = { version = "1.1", features = ["time"] }
+# the latency bench's global allocator: the binary's (crates/brrrrr)
+tikv-jemallocator = "0.7"
+
+[[bench]]
+name = "gate"
+harness = false
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[[bench]]
+name = "memory"
+harness = false
+
+[[bench]]
+name = "latency"
+harness = false
+
+[[test]]
+name = "all"
+path = "tests/all.rs"

@@ -1,0 +1,13 @@
+apiVersion: 1
+datasources:
+  - name: brrrrr
+    uid: brrrrr
+    type: grafana-postgresql-datasource
+    url: 127.0.0.1:5433
+    user: brrrrr
+    jsonData:
+      database: brrrrr
+      sslmode: disable
+      postgresVersion: 1600
+    secureJsonData:
+      password: change-me

@@ -1,0 +1,107 @@
+<!-- title: Getting started · brrrrr | description: Install brrrrr and run your first queries over trades and quotes in five minutes: from the shell, from Python, and as a live server. -->
+<p class="eyebrow">Getting started</p>
+<h1>Your first five minutes</h1>
+<p class="lede">Install brrrrr, query a file of trades, build bars, join trades to quotes, and serve a live view. Every command on this page runs as written.</p>
+
+<h2 id="install">Install</h2>
+<div class="tbl"><table>
+<thead><tr><th>You want</th><th>Run</th></tr></thead>
+<tbody>
+<tr><td>Python (SQL shell included)</td><td><code>pip install brrrrr</code></td></tr>
+<tr><td>The binary: shell, server, pipelines (Linux, macOS)</td><td><code>curl -fsSL https://aperiodic-io.github.io/monotile/install.sh | sh</code></td></tr>
+<tr><td>From source (Rust, a C compiler, make and perl)</td><td><code>cargo install --locked --git https://github.com/aperiodic-io/monotile brrrrr</code></td></tr>
+<tr><td>Docker</td><td><code>docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/data" -w /data ghcr.io/aperiodic-io/monotile sql</code></td></tr>
+</tbody></table></div>
+<p>The Python package installs <code>brrrrr-sql</code>, a shell with the same SQL. The binary is <code>brrrrr</code>; <code>brrrrr sql</code> is its shell, and <code>brrrrr serve</code> its server. Examples below use the binary; with pip, write <code>brrrrr-sql</code> where they say <code>brrrrr sql</code> (it takes a statement, or <code>-f file.sql</code>; to write a file, use <code>COPY</code>).</p>
+
+<h2 id="data">Some data</h2>
+<p>The examples use three small files from the repository: half an hour of trades and quotes for BTC, ETH and SOL, and a table of instruments. Download them, or query them straight from GitHub: brrrrr reads <code>https://</code> URLs as it reads files.</p>
+<pre><code class="sh">$ for f in trades quotes instruments; do
+    curl -sO https://raw.githubusercontent.com/aperiodic-io/monotile/main/fixtures/cookbook/$f.csv
+  done</code></pre>
+
+<h2 id="first">A first query</h2>
+<p>A file in quotes is a table. Its columns and their types are read from the file; times in text are read as times.</p>
+<pre><code class="sh">$ brrrrr sql "DESCRIBE 'trades.csv'"</code></pre>
+<pre class="out">┌────────┬───────────┐
+│ column │ type      │
+├────────┼───────────┤
+│ ts     │ timestamp │
+│ symbol │ varchar   │
+│ price  │ double    │
+│ size   │ double    │
+│ side   │ varchar   │
+└────────┴───────────┘</pre>
+<pre><code class="sh">$ brrrrr sql "SELECT symbol, count(*) AS trades, vwap(price, size) AS vwap
+              FROM 'trades.csv' GROUP BY symbol ORDER BY symbol"</code></pre>
+<pre class="out">┌────────┬────────┬─────────────┐
+│ symbol │ trades │ vwap        │
+├────────┼────────┼─────────────┤
+│ BTC    │    827 │ 42202.06861 │
+│ ETH    │    887 │ 2300.399444 │
+│ SOL    │    851 │ 98.67539508 │
+└────────┴────────┴─────────────┘
+3 rows</pre>
+<p>The same works for Parquet and JSON lines, for gzipped CSV, for a glob (<code>'data/*.parquet'</code>), for a directory of Hive partitions (<code>'trades/'</code> holding <code>date=2024-01-02/…</code>), and for <code>s3://</code>, <code>gs://</code>, <code>az://</code> and <code>https://</code> URLs. <a href="files.html">Files and object stores</a> has the details.</p>
+
+<h2 id="bars">Bars</h2>
+<p><code>time_bucket</code> puts each row in its bucket of time, and <code>first</code> and <code>last</code> take the value at the earliest and latest time in it. Run SQL like this in the shell (<code>brrrrr</code>, then paste it), or save it as <code>bars.sql</code> and run <code>brrrrr sql -f bars.sql</code>:</p>
+<pre><code class="sql">SELECT time_bucket('1m', ts) AS minute, symbol,
+       first(price, ts) AS open, max(price) AS high, min(price) AS low,
+       last(price, ts) AS close, sum(size) AS volume
+FROM 'trades.csv'
+GROUP BY minute, symbol
+ORDER BY minute, symbol
+LIMIT 4;</code></pre>
+<pre class="out">┌─────────────────────┬────────┬────────────┬────────────┬────────────┬────────────┬─────────┐
+│ minute              │ symbol │ open       │ high       │ low        │ close      │ volume  │
+├─────────────────────┼────────┼────────────┼────────────┼────────────┼────────────┼─────────┤
+│ 2024-01-01 00:00:00 │ BTC    │ 42004.1925 │ 42015.8896 │ 41780.2397 │ 41780.2397 │ 18.1991 │
+│ 2024-01-01 00:00:00 │ ETH    │    2300.23 │  2305.1513 │  2294.5451 │  2304.9286 │ 27.7755 │
+│ 2024-01-01 00:00:00 │ SOL    │   101.0638 │   101.1426 │   100.8715 │   100.9261 │ 17.9248 │
+│ 2024-01-01 00:01:00 │ BTC    │ 41801.9904 │ 42015.3878 │ 41791.0361 │ 41972.0465 │ 23.2263 │
+└─────────────────────┴────────┴────────────┴────────────┴────────────┴────────────┴─────────┘
+4 rows</pre>
+<p>Bucket widths are written <code>'1m'</code>, <code>'5 minutes'</code>, <code>'1h'</code> or <code>INTERVAL '1 day'</code>. Write the result to a file with <code>-o</code>, its format from its name, or with <code>COPY</code> (to an <code>s3://</code> URL as well):</p>
+<pre><code class="sh">$ brrrrr sql -f bars.sql -o bars.parquet
+$ brrrrr sql "COPY (SELECT * FROM 'trades.csv' WHERE symbol = 'BTC') TO 'btc.parquet'"</code></pre>
+
+<h2 id="asof">Trades against quotes</h2>
+<p>An <code>ASOF JOIN</code> pairs each trade with the last quote of its symbol at or before it: the market the trade met. From there, slippage is arithmetic.</p>
+<pre><code class="sql">SELECT t.ts, t.symbol, t.side, t.price, q.bid, q.ask,
+       (t.price - (q.bid + q.ask) / 2) / ((q.bid + q.ask) / 2) * 1e4 AS slippage_bps
+FROM 'trades.csv' t
+ASOF JOIN 'quotes.csv' q ON t.symbol = q.symbol AND t.ts &gt;= q.ts
+ORDER BY t.ts
+LIMIT 5;</code></pre>
+<p><code>ASOF LEFT JOIN</code> keeps the trades with no quote before them. Snowflake's <code>MATCH_CONDITION</code> spelling works too.</p>
+
+<h2 id="python">From Python</h2>
+<pre><code class="py">import brrrrr
+
+bars = brrrrr.sql("""
+    SELECT time_bucket('5m', ts) AS t, symbol, vwap(price, size) AS vwap
+    FROM 'trades.csv' GROUP BY t, symbol ORDER BY t, symbol
+""")
+bars.show()      # prints a table
+df = bars.pl()   # or .df() for pandas, .arrow() for pyarrow</code></pre>
+<p>A Polars, pandas or pyarrow table in a variable is queried by its name. See <a href="python.html">Python</a>.</p>
+
+<h2 id="serve">Live</h2>
+<p><code>brrrrr serve</code> holds live tables: rows written now are queried at once, with their history, and a live view keeps a query's answer as rows arrive.</p>
+<pre><code class="sh">$ brrrrr serve --data ./data &amp;
+$ curl -s -X POST 'localhost:4242/write/trades?format=csv' --data-binary @trades.csv
+{"table":"trades","rows":2565}
+$ curl -s -X POST localhost:4242/query --data "CREATE LIVE VIEW bars AS
+    SELECT time_bucket('1m', ts) AS minute, symbol, last(price, ts) AS close, sum(size) AS volume
+    FROM trades GROUP BY minute, symbol"
+$ psql -h localhost -p 5433 -c "SELECT * FROM bars ORDER BY minute DESC LIMIT 3"</code></pre>
+<p>Open <a href="http://127.0.0.1:4242">http://127.0.0.1:4242</a> for the console. The <a href="server.html">server guide</a> covers Kafka ingest, subscriptions, tokens and Grafana.</p>
+
+<h2 id="next">Next</h2>
+<div class="grid2">
+  <a class="card" href="cookbook.html"><h3>Cookbook</h3><p>The queries people run on market data, sensors and logs, each with its answer.</p></a>
+  <a class="card" href="sql.html"><h3>SQL reference</h3><p>Every statement, clause and function, and what is refused.</p></a>
+  <a class="card" href="https://github.com/aperiodic-io/monotile/blob/main/examples/notebooks/crypto-tca.ipynb"><h3>Tutorial: a day of BTC trades</h3><p>A notebook on a synthetic day of trades and quotes for three coins, made in its first cell: bars, spreads, the cost of each trade, markouts, volatility.</p></a>
+  <a class="card" href="https://github.com/aperiodic-io/monotile/tree/main/examples/live-dashboard"><h3>A live dashboard</h3><p><code>docker compose up</code>: a market feed through Kafka into brrrrr's live views, charted by Grafana every second.</p></a>
+</div>

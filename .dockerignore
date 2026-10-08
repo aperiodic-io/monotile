@@ -1,0 +1,10 @@
+# Patterns are anchored at the context's root: `**/` also reaches nested directories.
+.git/
+.claude/
+**/target/
+**/mutants.out*/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
+# local scratch (gitignored): bench and smoke builds
+target-*/

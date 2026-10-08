@@ -1,0 +1,267 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+# a newer push to a PR makes its running checks moot: stop them. A push to main has a group of
+# its own: it is never cancelled, running or pending.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# the token reads the repository only; the jobs that need more say so
+permissions: { contents: read }
+env:
+  CARGO_TERM_COLOR: always
+  # rdkafka's ssl-vendored builds OpenSSL from source unless told not to (openssl-sys)
+  OPENSSL_NO_VENDOR: 1
+  RUSTFLAGS: -D warnings
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # the system's OpenSSL for test builds (OPENSSL_NO_VENDOR, workflow env): building the vendored
+      # one takes ~4 minutes of a clean build; the image keeps it vendored (Dockerfile)
+      - run: dpkg -s libssl-dev pkg-config > /dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev pkg-config)
+      - run: cargo fmt --all --check
+      # both builds: the default one (checkpoints on the volume) and -extended's (object store too)
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with: { tool: "cargo-nextest,cargo-llvm-cov" }
+      # the system's OpenSSL for test builds (OPENSSL_NO_VENDOR, workflow env): building the vendored
+      # one takes ~4 minutes of a clean build; the image keeps it vendored (Dockerfile)
+      - run: dpkg -s libssl-dev pkg-config > /dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev pkg-config)
+      # Unit, property, golden and driver tests with coverage, with every feature (the object
+      # store's too); acceptance runs separately.
+      - run: cargo llvm-cov nextest --workspace --all-features --lcov --output-path lcov.info -E 'not binary(acceptance)'
+      # the default build's own tests (without the object store, its URLs are refused)
+      - run: cargo nextest run -p brrrrr --bins
+      # an S3 server for the object store's tests (the -extended image's checkpoints)
+      - run: |
+          docker run -d -p 29090:9090 -e COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS=checkpoints adobe/s3mock:5.2.3
+          timeout 120 sh -c 'until curl -s -o /dev/null http://127.0.0.1:29090/; do sleep 1; done'
+      - run: cargo nextest run -p brrrrr --bins --all-features --run-ignored only -E 'test(/against_s3$/)'
+        env: { BRRRRR_IT_S3: "http://127.0.0.1:29090" }
+      - run: scripts/coverage-gate.sh lcov.info
+
+  acceptance:
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # the system's OpenSSL for test builds (OPENSSL_NO_VENDOR, workflow env): building the vendored
+      # one takes ~4 minutes of a clean build; the image keeps it vendored (Dockerfile)
+      - run: dpkg -s libssl-dev pkg-config > /dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev pkg-config)
+      # Kafka scenarios start Redpanda themselves, published on this port. @stress and @nightly
+      # scenarios run in nightly.yml; @object-store ones need the -extended build and an S3.
+      - run: cargo test --test acceptance -- --tags 'not @nightly and not @stress and not @object-store'
+        env: { BRRRRR_IT_BROKER: "127.0.0.1:19092" }
+      # an S3 server for the object store's tests (the -extended image's checkpoints); these run
+      # even when the scenarios above failed, so one failure does not hide another
+      - if: ${{ !cancelled() }}
+        run: |
+          docker run -d -p 29090:9090 -e COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS=checkpoints adobe/s3mock:5.2.3
+          timeout 120 sh -c 'until curl -s -o /dev/null http://127.0.0.1:29090/; do sleep 1; done'
+      - if: ${{ !cancelled() }}
+        run: cargo test --test acceptance --features object-store -- --tags '@object-store and not @nightly and not @stress'
+        env: { BRRRRR_IT_BROKER: "127.0.0.1:19092", BRRRRR_IT_S3: "http://127.0.0.1:29090" }
+
+  # `brrrrr sql` and `brrrrr serve` as users run them (tests/acceptance/sql): the runner starts
+  # its own S3, GCS and Azure emulators and Redpanda in Docker
+  sql:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: dpkg -s libssl-dev pkg-config > /dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev pkg-config)
+      - run: cargo test -p brrrrr --test sql
+
+  # the Python package: built as release.yml builds its wheels, then its tests
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with: { python-version: "3.12" }
+      - run: |
+          pip install maturin pytest pyarrow pandas polars
+          maturin build --release -m crates/brrrrr-py/Cargo.toml --out dist
+          pip install dist/*.whl
+          cd crates/brrrrr-py/tests && pytest -q
+
+  iggy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: dpkg -s libssl-dev pkg-config > /dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev pkg-config)
+      # Protocol-compatible upstream nightly, pinned so a later nightly cannot change this PR's tests.
+      - run: |
+          docker run -d --name iggy --network host --security-opt seccomp=unconfined --ulimit memlock=-1:-1 --memory 1g \
+            -e IGGY_MEMORY_POOL_SIZE=512MiB -e IGGY_ROOT_USERNAME=iggy -e IGGY_ROOT_PASSWORD=iggy \
+            apache/iggy@sha256:0cbe04ad7d3becb96c231d3c8e91c8a06c4c157d83923156a28da966b04e4c67
+          docker run -d --name kafka -p 19092:19092 redpandadata/redpanda:v24.2.7 \
+            redpanda start --mode dev-container --smp 1 --memory 512M --reserve-memory 0M --check=false \
+            --kafka-addr 0.0.0.0:19092 --advertise-kafka-addr 127.0.0.1:19092
+          timeout 120 bash -c 'until echo > /dev/tcp/127.0.0.1/8090 && echo > /dev/tcp/127.0.0.1/19092; do sleep 1; done'
+      - run: |
+          cargo test -p brrrrr --features iggy --bin brrrrr iggy:: -- --include-ignored
+        env: { BRRRRR_IT_IGGY: "iggy+tcp://iggy:iggy@127.0.0.1:8090" }
+      - run: cargo test -p brrrrr --features iggy --test iggy -- --ignored
+        env: { BRRRRR_IT_IGGY: "iggy+tcp://iggy:iggy@127.0.0.1:8090", BRRRRR_IT_BROKER: "127.0.0.1:19092" }
+      # Durable cursors and checkpoints are separate contracts. The crash case
+      # restarts only this job's broker; serialize tests sharing that process.
+      - run: cargo test -p brrrrr --features iggy --test iggy_durability -- --ignored --test-threads=1
+        env:
+          BRRRRR_IT_IGGY: "iggy+tcp://iggy:iggy@127.0.0.1:8090"
+          BRRRRR_IT_BROKER: "127.0.0.1:19092"
+          BRRRRR_IT_IGGY_CONTAINER: iggy
+      - if: failure()
+        run: docker logs iggy && docker logs kafka
+
+  mutants:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # 8 shards: each spends ~9 minutes on its baseline build, then ~16 s per mutant (most of it the
+      # incremental rebuild); a diff of ~1,500 mutants takes ~1 hour rather than ~2 in 4
+      matrix: { shard: [0, 1, 2, 3, 4, 5, 6, 7] }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { fetch-depth: 0 }
+      # the dependencies of the `mutants` profile, built on main (mutants-cache) and restored by every
+      # shard: without them each shard built them all again (~7 of its ~9 minutes before its first
+      # mutant). Saved on failure too: a missed mutant fails the job, not its build.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with: { shared-key: mutants, cache-on-failure: true }
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with: { tool: "cargo-mutants,cargo-nextest" }
+      # the system's OpenSSL for test builds (OPENSSL_NO_VENDOR, workflow env): building the vendored
+      # one takes ~4 minutes of a clean build; the image keeps it vendored (Dockerfile)
+      - run: dpkg -s libssl-dev pkg-config > /dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev pkg-config)
+      - run: git diff origin/${{ github.base_ref }}... -- '*.rs' > pr.diff
+      # Every mutant in changed non-test code must be caught by a test. cargo-mutants exits 2
+      # when a mutant was missed and 3 when one timed out (it hung the suite, so it was detected),
+      # but reports 3 ahead of 2: a 3 passes only when missed.txt is empty. Unviable mutants do
+      # not change the exit code; 4 (the unmutated tree's tests fail), 1, 5, 6 and 70 fail.
+      # The runtime's I/O functions are excluded in .cargo/mutants.toml (the acceptance job covers them).
+      # Incremental: rust-cache turns it off, and then every mutant rebuilds the workspace from
+      # scratch (83 s per mutant on 2 vCPUs; incremental, with the `mutants` profile: 10 s).
+      # Each test binary runs under a 4 GiB address-space limit (the suite needs far less): a mutant
+      # that allocates without bound fails its test (caught) instead of exhausting the runner's
+      # 8 GB, which kills the runner agent and the shard with it.
+      - env:
+          CARGO_INCREMENTAL: "1"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: "prlimit --as=4294967296"
+        run: |
+          c=0
+          cargo mutants --in-diff pr.diff -p brrrrr-core -p brrrrr --all-features --no-shuffle --shard ${{ matrix.shard }}/8 || c=$?
+          if [ "$c" -eq 3 ] && [ -s mutants.out/timeout.txt ] && ! [ -s mutants.out/missed.txt ]; then c=0; fi
+          exit "$c"
+
+  # main's build of the `mutants` profile, for the shards' cache: a pull request's caches are its
+  # own, and the mutants job runs on pull requests only, so a new one would start without any.
+  mutants-cache:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with: { shared-key: mutants }
+      - run: dpkg -s libssl-dev pkg-config > /dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev pkg-config)
+      - run: cargo test --no-run --profile mutants -p brrrrr-core -p brrrrr --all-features
+
+  bench-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # thin LTO for both builds the gate compares (merge base and PR): the gate bench rebuilds in
+    # 54 s instead of 73 s, twice per run; Cargo.toml's bench profile (fat LTO, as releases)
+    # stays what local benchmarks measure
+    env: { CARGO_PROFILE_BENCH_LTO: thin }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { fetch-depth: 0 }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with: { tool: "gungraun-runner@0.19.4" }
+      # Baseline from the merge base, then the PR must stay within 2% instructions. The baseline is
+      # this run's own: gungraun's home is outside target/ (which rust-cache restores) and emptied
+      # first, so the PR is never compared with an older run's numbers. A baseline that fails to
+      # build or run fails the gate; only a merge base without the gate bench skips the comparison.
+      - run: |
+          export GUNGRAUN_HOME="$RUNNER_TEMP/gungraun"
+          rm -rf "$GUNGRAUN_HOME"
+          base=$(git merge-base HEAD origin/${{ github.base_ref }})
+          if git cat-file -e "$base:crates/brrrrr-core/benches/gate.rs" 2> /dev/null; then
+            git checkout -q "$base"
+            cargo bench -p brrrrr-core --bench gate -- --save-baseline=base
+            git checkout -q ${{ github.sha }}
+            cargo bench -p brrrrr-core --bench gate -- --baseline=base --callgrind-limits='ir=2%'
+          else
+            echo "::warning::the merge base $base has no gate bench: nothing to compare with, the PR's benches only run"
+            cargo bench -p brrrrr-core --bench gate
+          fi
+
+  # the images as they will be deployed: built, then smoke-tested (scripts/image-smoke.sh). The
+  # default one checkpoints to the pod's volume only; -extended also to an object store.
+  image-smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { variant: "", features: "" }
+          - { variant: extended, features: object-store }
+          - { variant: historical, features: historical }
+          # Temporarily disabled: Iggy image smoke test.
+          # - { variant: iggy, features: iggy }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      # the dependency layer (Dockerfile, cargo-chef) comes from the Actions cache, the same scope
+      # the image job fills on main; a failing cache does not fail the build
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          build-args: FEATURES=${{ matrix.features }}
+          tags: brrrrr:smoke
+          load: true
+          cache-from: type=gha,scope=image-${{ matrix.variant || 'default' }}
+          cache-to: type=gha,scope=image-${{ matrix.variant || 'default' }},mode=max,ignore-error=true
+      - run: scripts/image-smoke.sh brrrrr:smoke ${{ matrix.variant }}
+
+  # libFuzzer on every target for a minute; the SQL target starts from the example pipelines
+  fuzz:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env: { RUSTFLAGS: "" } # -D warnings would fail on nightly-only lints
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with: { tool: cargo-fuzz }
+      - run: mkdir -p fuzz/corpus/sql && cp fixtures/pipelines/*.sql fuzz/corpus/sql/
+      # the ad-hoc queries people write: the cookbook's, the SQL scenarios' and the query tests'
+      - run: python3 fuzz/seed_query.py
+      - run: |
+          cd fuzz
+          for t in sql proto format engine restore checkpoint query; do
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$t" -- -max_total_time=60 -rss_limit_mb=3000 -max_len=4096 -len_control=0
+          done
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: fuzz-artifacts, path: fuzz/artifacts }

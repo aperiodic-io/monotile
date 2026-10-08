@@ -1,0 +1,44 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "brrrrr"
+description = "SQL for tick data: query Parquet, CSV and JSON on disk or in S3, GCS and Azure. Bars, as-of joins, VWAP, and the same SQL live."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+keywords = ["sql", "time-series", "tick-data", "market-data", "kdb", "parquet", "arrow", "quant"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Financial and Insurance Industry",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Topic :: Database",
+  "Topic :: Office/Business :: Financial :: Investment",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+arrow = ["pyarrow>=14"]
+pandas = ["pandas>=2.2", "pyarrow>=14"]
+polars = ["polars>=1.0"]
+test = ["pytest", "pyarrow>=14", "pandas>=2.2", "polars>=1.0", "ipython>=8"]
+
+[project.urls]
+Homepage = "https://aperiodic-io.github.io/monotile/"
+Documentation = "https://aperiodic-io.github.io/monotile/docs/"
+Repository = "https://github.com/aperiodic-io/monotile"
+
+[project.scripts]
+brrrrr-sql = "brrrrr.__main__:main"
+
+[tool.maturin]
+python-source = "python"
+module-name = "brrrrr._brrrrr"
+features = ["extension-module"]
+# the extension without its symbols: about a quarter of the size (the profile keeps line tables)
+strip = true

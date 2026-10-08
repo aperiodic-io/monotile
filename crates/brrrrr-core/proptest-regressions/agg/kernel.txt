@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 55e35c962fac2b4a557fa0ba5c93232e784139a39d3850d7cbdeb9d50e3dbc92 # shrinks to seed = 0, d = [[Null, Null, Null, Null, Null, F64(0.0), Null], [F64(-548.0247829199377), F64(-97.74065982155203), F64(-924.8628748216943), F64(NaN), F64(-135.2730112613565), F64(-137.4292076511466), F64(-332.7670874469191)], [Null, Null, Null, Bool(true), Null, Bool(false), Bool(true)], [Str("buy"), Str("buy"), Str("sell"), Str("buy"), Str("sell"), Str("x"), Str("sell")], [Time(49), Time(11), Time(8), Time(38), Time(24), Time(5), Time(36)], [Str("13"), Str("9"), Str("2"), Str("5"), Str("10"), Str("0"), Str("11")], [Int(4), Int(3), Int(4), Int(1), Int(1), Int(1), Int(4)], [Null, Null, Null, Time(6), Null, Time(13), Time(1)]]

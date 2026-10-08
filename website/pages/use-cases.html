@@ -1,0 +1,78 @@
+<!-- title: Use cases · brrrrr | description: What people build with brrrrr: quant research on Parquet archives, execution and TCA, crypto market data, sensors and IoT, operations metrics and product events. With the queries. -->
+<p class="eyebrow">Use cases</p>
+<h1>Anything with a timestamp</h1>
+<p class="lede">brrrrr was built for market data, where time drives every query. The same shapes (buckets, last values, joins by time, rolling windows) run sensors, services and products. Six of them, with the queries.</p>
+
+<h2 id="research">Quant research on an archive</h2>
+<p>Years of trades and quotes in Parquet on S3, partitioned by date. Researchers want bars, features and signals in a notebook without loading a database, and the features must be computed the same way when the strategy runs live.</p>
+<pre><code class="py">import brrrrr
+
+features = brrrrr.sql("""
+    SELECT time_bucket('5m', ts) AS t, symbol,
+           last(price, ts) / first(price, ts) - 1 AS ret_5m,
+           vwap(price, size) AS vwap,
+           sum(size) FILTER (WHERE side = 'buy') - sum(size) FILTER (WHERE side = 'sell') AS net_flow,
+           count(*) AS trades
+    FROM 's3://archive/trades/'
+    WHERE date BETWEEN '2024-01-01' AND '2024-03-31'
+    GROUP BY t, symbol
+""").pl()</code></pre>
+<p>The same query becomes a <a href="docs/server.html#live-views">live view</a> when the strategy goes live: one definition of each feature.</p>
+
+<h2 id="tca">Execution and transaction costs</h2>
+<p>Every fill against the market it met: the quote at or before it, from an exact as-of join. Slippage, effective spread and costs per venue or per algorithm follow.</p>
+<pre><code class="sql">SELECT f.venue, f.algo, count(*) AS fills,
+       avg(CASE WHEN f.side = 'buy' THEN 1 ELSE -1 END
+           * (f.price - (q.bid + q.ask) / 2) / ((q.bid + q.ask) / 2) * 1e4) AS cost_bps,
+       sum(f.qty * f.price) AS notional
+FROM 'fills.parquet' f
+ASOF JOIN 'quotes.parquet' q ON f.symbol = q.symbol AND f.ts &gt;= q.ts
+GROUP BY f.venue, f.algo
+ORDER BY cost_bps DESC</code></pre>
+<p>More: <a href="docs/cookbook.html#slippage">slippage</a>, <a href="docs/cookbook.html#effective_spread">effective spread</a>, <a href="docs/cookbook.html#book_imbalance">imbalance</a>. Over a whole day: <a href="https://github.com/aperiodic-io/monotile/blob/main/examples/notebooks/crypto-tca.ipynb">a notebook</a> measures what each trade of a synthetic day of trades and quotes paid against the mid, and where the price went after it.</p>
+
+<h2 id="crypto">Crypto market data, live</h2>
+<p>Exchange feeds land in Kafka. <code>brrrrr serve</code> ingests them into live tables, keeps today in memory and history in daily Parquet, and serves bars to dashboards over the PostgreSQL protocol and to apps as server-sent events.</p>
+<pre><code class="sh">$ brrrrr serve --data /var/lib/brrrrr --kafka redpanda:9092 \
+    --ingest trades=market.trades --ingest quotes=market.quotes</code></pre>
+<pre><code class="sql">CREATE LIVE VIEW bars_1m AS
+SELECT time_bucket('1m', ts) AS minute, symbol,
+       first(price, ts) AS open, max(price) AS high, min(price) AS low, last(price, ts) AS close,
+       sum(size) AS volume, vwap(price, size) AS vwap
+FROM trades GROUP BY minute, symbol;</code></pre>
+<p>Run it: <a href="https://github.com/aperiodic-io/monotile/tree/main/examples/live-dashboard">the live dashboard example</a> starts a feed, Redpanda, brrrrr and a provisioned Grafana with one <code>docker compose up</code>.</p>
+
+<h2 id="iot">Sensors and IoT</h2>
+<p>Devices report readings and counters at their own pace. The questions: rates, percentiles, anomalies, and charts that do not choke on a million points.</p>
+<pre><code class="sql">-- per device and minute: the shape of the signal, for a chart
+SELECT time_bucket('1m', ts) AS minute, device,
+       first(temperature, ts) AS first, min(temperature) AS min,
+       max(temperature) AS max, last(temperature, ts) AS last
+FROM 's3://plant/readings/*.parquet'
+GROUP BY minute, device</code></pre>
+<p>More: <a href="docs/cookbook.html#counter_rate">counter rates</a>, <a href="docs/cookbook.html#anomalies">anomalies</a>, <a href="docs/cookbook.html#sessions">sessions</a>, <a href="docs/cookbook.html#gaps">gaps</a>.</p>
+
+<h2 id="ops">Operations metrics</h2>
+<p>Request logs as JSON lines: latency percentiles and error rates per endpoint and minute, on a Grafana panel through the PostgreSQL protocol, or over last month's logs in S3.</p>
+<pre><code class="sql">SELECT time_bucket('1m', ts) AS minute, endpoint,
+       count(*) AS requests,
+       quantile_cont(latency_ms, 0.5) AS p50,
+       quantile_cont(latency_ms, 0.99) AS p99,
+       count(*) FILTER (WHERE status &gt;= 500) / count(*) AS error_rate
+FROM 'logs/2024-06-*.jsonl.gz'
+GROUP BY minute, endpoint</code></pre>
+
+<h2 id="events">Product events</h2>
+<p>Event exports from an app (a user, an event, a time): activity over time, sessions, and how far users get through a flow.</p>
+<pre><code class="sql">-- sign-up funnel per day
+SELECT time_bucket('1d', ts) AS day,
+       count(*) FILTER (WHERE event = 'visit') AS visits,
+       count(*) FILTER (WHERE event = 'signup') AS signups,
+       count(*) FILTER (WHERE event = 'purchase') AS purchases
+FROM 'events.parquet'
+GROUP BY day
+ORDER BY day</code></pre>
+<p>More: <a href="docs/cookbook.html#funnel">funnels</a>, <a href="docs/cookbook.html#busiest_hours">activity by hour</a>, <a href="docs/cookbook.html#first_seen">first and last seen</a>, <a href="docs/cookbook.html#time_to_purchase">time to purchase</a>.</p>
+
+<h2 id="yours">Yours</h2>
+<p>Using brrrrr for something else? <a href="https://github.com/aperiodic-io/monotile/discussions">Tell us in Discussions</a>; the best become cookbook recipes.</p>

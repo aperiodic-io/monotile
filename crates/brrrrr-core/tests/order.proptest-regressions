@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc db07be6084e561a606801e7cae20dc13a690c6fc4f09f2fcc919b58188ca4d62 # shrinks to seed = 10263, rows = 41, null = 4
+cc 7c93812cae89a8ff42ca0e47c2ced9972e636c63d3fa93c6042cd8cfc7a83ac4 # shrinks to a = Null, b = Array([Int(9007199254740993)]), c = Array([F64(9007199254740992.0), Null])

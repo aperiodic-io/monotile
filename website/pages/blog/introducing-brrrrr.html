@@ -1,0 +1,115 @@
+<!-- title: Introducing brrrrr · brrrrr | description: brrrrr is open source: one SQL engine for tick data, over files you own, ad hoc, live and as exactly-once pipelines. Why we built it, a tour, the benchmarks, and what it is not. -->
+<p class="eyebrow">Blog · October 2026</p>
+<h1>Introducing brrrrr</h1>
+<p class="lede">brrrrr is a SQL engine for tick data and other time series. It queries Parquet, CSV and JSON where they are, on disk or in object stores; it runs the same query live, as rows arrive; and it runs it as an exactly-once pipeline from Kafka to Kafka. Today we are opening it under Apache-2.0.</p>
+
+<h2 id="why">Why we built it</h2>
+<p>Market-data metrics (bars, VWAP, order flow, slippage, funding) are wanted live and over years of history. That usually means two systems: a streaming engine for the live numbers, and a batch engine such as DuckDB over Parquet for backfills and research. Two engines mean two dialects of SQL, and two answers to the same question that do not always agree: a bar computed live is not quite the bar the backfill wrote.</p>
+<p>So we wrote one engine that does both. It started as a streaming engine, with exactly-once output and checkpoints. Then it learned to run ad-hoc SQL over files, by compiling each query into the views it already runs live, so a backfill gives what live gave. The problem is not ours alone, so we are opening it.</p>
+
+<h2 id="tour">A sixty-second tour</h2>
+<p>The data is a half hour of trades and quotes for three symbols, from the repository (<code>fixtures/cookbook</code>). A file in quotes is a table:</p>
+<pre><code class="sh">$ brrrrr sql "SELECT symbol, count(*) AS trades, vwap(price, size) AS vwap
+              FROM 'trades.csv' GROUP BY symbol ORDER BY symbol"</code></pre>
+<pre class="out">┌────────┬────────┬─────────────┐
+│ symbol │ trades │ vwap        │
+├────────┼────────┼─────────────┤
+│ BTC    │    827 │ 42202.06861 │
+│ ETH    │    887 │ 2300.399444 │
+│ SOL    │    851 │ 98.67539508 │
+└────────┴────────┴─────────────┘
+3 rows</pre>
+<p>Bars are a <code>GROUP BY</code> on a time bucket, with the first and last price by time:</p>
+<pre><code class="sh">$ brrrrr sql "SELECT time_bucket('5m', ts) AS t,
+                     first(price, ts) AS open, max(price) AS high,
+                     min(price) AS low, last(price, ts) AS close
+              FROM 'trades.csv' WHERE symbol = 'BTC'
+              GROUP BY t ORDER BY t LIMIT 3"</code></pre>
+<pre class="out">┌─────────────────────┬────────────┬────────────┬────────────┬────────────┐
+│ t                   │ open       │ high       │ low        │ close      │
+├─────────────────────┼────────────┼────────────┼────────────┼────────────┤
+│ 2024-01-01 00:00:00 │ 42004.1925 │ 42055.1659 │ 41780.2397 │ 41933.8837 │
+│ 2024-01-01 00:05:00 │ 41937.8301 │ 42413.7158 │  41799.827 │ 42300.6444 │
+│ 2024-01-01 00:10:00 │ 42316.4181 │ 42316.4181 │ 41955.8953 │ 42180.7427 │
+└─────────────────────┴────────────┴────────────┴────────────┴────────────┘
+3 rows</pre>
+<p>What did each trade pay against the mid? An <code>ASOF JOIN</code> pairs each trade with the last quote of its symbol at or before it:</p>
+<pre><code class="sh">$ brrrrr sql "SELECT t.symbol, count(*) AS trades,
+                     avg(CASE WHEN t.side = 'buy' THEN 1 ELSE -1 END
+                         * (t.price - (q.bid + q.ask) / 2)
+                         / ((q.bid + q.ask) / 2)) * 1e4 AS cost_bps
+              FROM 'trades.csv' t
+              ASOF JOIN 'quotes.csv' q ON t.symbol = q.symbol AND t.ts &gt;= q.ts
+              GROUP BY t.symbol ORDER BY t.symbol"</code></pre>
+<pre class="out">┌────────┬────────┬──────────────┐
+│ symbol │ trades │ cost_bps     │
+├────────┼────────┼──────────────┤
+│ BTC    │    827 │ 0.9999993221 │
+│ ETH    │    886 │  1.000007661 │
+│ SOL    │    851 │  1.000135503 │
+└────────┴────────┴──────────────┘
+3 rows</pre>
+<p>(Every trade of this synthetic data crosses a two-basis-point spread, so each pays half of it. Over a whole day the numbers say more: <a href="https://github.com/aperiodic-io/monotile/blob/main/examples/notebooks/crypto-tca.ipynb">a notebook</a> runs these queries over a synthetic day of trades and quotes, made to behave like a real market: trades that walk the book and move the price.)</p>
+<p>From Python, a DataFrame in a variable is a table, and results come back as Polars, pandas or Arrow:</p>
+<pre><code class="py">import brrrrr, polars as pl
+
+quotes = pl.read_csv("quotes.csv", try_parse_dates=True)
+brrrrr.sql("""
+    SELECT symbol, avg((ask - bid) / ((ask + bid) / 2)) * 1e4 AS spread_bps
+    FROM quotes GROUP BY symbol ORDER BY symbol
+""").pl()</code></pre>
+<pre class="out">┌────────┬────────────┐
+│ symbol ┆ spread_bps │
+│ ---    ┆ ---        │
+│ str    ┆ f64        │
+╞════════╪════════════╡
+│ BTC    ┆ 2.014701   │
+│ ETH    ┆ 2.005099   │
+│ SOL    ┆ 2.006742   │
+└────────┴────────────┘</pre>
+<p>Live, the same query keeps its answer as rows arrive. <code>brrrrr serve</code> holds live tables; a live view runs over the rows so far, then on each new one, and emits each bar as it closes:</p>
+<pre><code class="sh">$ brrrrr serve --data ./data &amp;
+$ curl -X POST 'localhost:4242/write/trades?format=csv' --data-binary @trades.csv
+{"table":"trades","rows":2565}
+$ curl -X POST localhost:4242/query --data "CREATE LIVE VIEW bars AS
+    SELECT time_bucket('1m', ts) AS minute, symbol, last(price, ts) AS close, sum(size) AS volume
+    FROM trades GROUP BY minute, symbol"
+$ curl -N localhost:4242/subscribe/bars        # then a trade at 00:30:05 closes the 00:29 bars
+data: {"minute":"2024-01-01T00:29:00Z","symbol":"BTC","close":42397.2663,"volume":10.77}
+data: {"minute":"2024-01-01T00:29:00Z","symbol":"ETH","close":2309.0747,"volume":16.9703}
+…</code></pre>
+<p>The views are tables: query them over the PostgreSQL protocol from psql, Grafana or any driver, or watch them in the browser console at <code>localhost:4242</code>.</p>
+
+<h2 id="one-sql">One SQL, three ways to run it</h2>
+<ul>
+<li><strong>Ad hoc</strong>, over files and object stores: <code>brrrrr sql</code>, the shell, Python and Jupyter (<code>%%sql</code>).</li>
+<li><strong>Live</strong>, in a server: live tables written over HTTP or from Kafka, live views, subscriptions, the PostgreSQL protocol.</li>
+<li><strong>As a pipeline</strong>: <code>brrrrr run</code> reads Kafka topics, runs the views, and writes their rows to Kafka exactly once, with checkpoints that survive <code>kill -9</code>.</li>
+</ul>
+<p>All three compile the query into the same views and run them in the same engine. A backfill over last year's files gives the bars the live view would have given.</p>
+
+<h2 id="files">Your files, in place</h2>
+<p>There is no import step and no storage format of ours. brrrrr reads Parquet, CSV (gzipped too) and JSON lines, single files, globs and Hive-partitioned directories, on disk, in S3 (and MinIO and R2), GCS, Azure, or at a URL; Delta and Iceberg tables too. <code>COPY ... TO</code> writes Parquet back, partitioned by date if you like. The data stays yours, in formats every other tool reads.</p>
+
+<h2 id="vocabulary">The kdb+ vocabulary, in SQL</h2>
+<p>Tick data has its own verbs: as-of joins, time buckets, first and last by time, VWAP, forward fill. kdb+ has them in q; most SQL engines have some of them, spelled differently. brrrrr has them in SQL: <code>ASOF JOIN</code> (strict, with a tolerance, or at an offset for markouts), <code>time_bucket</code> in any time zone, <code>first(x, ts)</code> and <code>last(x, ts)</code>, <code>vwap</code>, <code>twap</code>, <code>locf</code> and gap filling, <code>ema</code>, window functions, exact percentiles. <a href="../docs/from-kdb.html">Coming from kdb+</a> maps one to the other; the <a href="../docs/cookbook.html">cookbook</a> has {{recipes}} recipes, each checked against DuckDB's answer.</p>
+
+<h2 id="benchmarks">The benchmarks, plainly</h2>
+<p>On a synthetic day of 10 million trades and 20 million quotes, brrrrr computes one-minute bars and hourly VWAP about 1.6 times faster than DuckDB, and per-symbol transaction costs (an as-of join) faster in half the memory. It is slower on plain group-bys, filters and arithmetic over every row, where DuckDB's vectorized aggregation is very good, and on a single total after an as-of join. <a href="../benchmarks.html">The benchmarks page</a> has every query, memory, the method and the scripts, with DuckDB, Polars and ClickHouse side by side.</p>
+
+<h2 id="not">What brrrrr is not</h2>
+<ul>
+<li><strong>Not a general-purpose database.</strong> No transactions, updates or deletes; rows are appended. Its SQL is narrower than a database's: no full outer joins or many-to-many joins, no correlated subqueries. What it cannot run, it refuses with the reason and what to write instead.</li>
+<li><strong>Not a cluster.</strong> A query runs on one machine, on all its cores. Scale out by running a pipeline per feed, or a query per partition.</li>
+<li><strong>Not q.</strong> If you live in q, brrrrr will not replace it; if your team writes SQL and keeps data in Parquet, it may replace the parts of kdb+ you use.</li>
+<li><strong>Young.</strong> The streaming engine and its exactly-once pipelines are the most tested parts. The SQL shell, the Python package and the server are new; their interfaces may change before 1.0. The <a href="https://github.com/aperiodic-io/monotile/blob/main/docs/ROADMAP.md">roadmap</a> says what comes next.</li>
+</ul>
+
+<h2 id="involved">Get involved</h2>
+<p><code>pip install brrrrr</code> and <a href="../docs/index.html">the first five minutes</a> are the quickest way in. Then:</p>
+<ul>
+<li><strong>A query that is slow, refused or wrong</strong> is the most useful thing you can send us: <a href="https://github.com/aperiodic-io/monotile/issues/new/choose">open an issue</a> with the query and the shape of your data.</li>
+<li><strong>A recipe</strong> for the cookbook, from your own work: market data, sensors, logs.</li>
+<li><strong>Questions and ideas</strong> in <a href="https://github.com/aperiodic-io/monotile/discussions">Discussions</a>; code in pull requests (<a href="https://github.com/aperiodic-io/monotile/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>).</li>
+</ul>
+<p>The code is on <a href="https://github.com/aperiodic-io/monotile">GitHub</a>, Apache-2.0.</p>

@@ -1,0 +1,141 @@
+<!-- title: Streaming pipelines · brrrrr | description: brrrrr run: SQL pipelines from Kafka to Kafka, exactly once, with checkpoints that survive a crash. JSON sources, windows, the SQL they take, options, metrics and Kubernetes. -->
+<p class="eyebrow">Reference</p>
+<h1>Streaming pipelines</h1>
+<p class="lede"><code>brrrrr run</code> runs a SQL pipeline from Kafka topics to Kafka topics: it reads each message as a row, runs your views over the rows as they arrive, and writes each result to a topic exactly once. It checkpoints as it goes, so a crash, <code>kill -9</code> or redeploy neither loses a message nor writes one twice.</p>
+<pre><code class="sh">$ brrrrr run bars.sql --checkpoints ./checkpoints
+checkpoints: ./checkpoints/bars/2d73620a6f82043b
+claimed the pipeline with checkpoint 1</code></pre>
+
+<h2 id="example">An example: trades to bars</h2>
+<p>Trades arrive on the topic <code>trades</code>, one JSON object per message. One-minute OHLCV bars go to <code>bars.1m</code>, one JSON object per bar, each written once its minute has closed. This is <a href="https://github.com/aperiodic-io/monotile/tree/main/examples/pipelines">examples/pipelines</a>, whose README runs it against Redpanda in Docker, step by step.</p>
+<pre><code class="sql">CREATE EXTERNAL STREAM trades (
+  time datetime64(3),
+  symbol string,
+  price float64,
+  quantity float64
+) SETTINGS type = 'kafka', brokers = 'localhost:19092', topic = 'trades', data_format = 'JSONEachRow';
+
+CREATE EXTERNAL STREAM bars_1m (
+  minute datetime64(3), symbol string,
+  open float64, high float64, low float64, close float64, volume float64, trade_count uint64
+) SETTINGS type = 'kafka', brokers = 'localhost:19092', topic = 'bars.1m', data_format = 'JSONEachRow',
+  one_message_per_row = true;
+
+CREATE MATERIALIZED VIEW bars INTO bars_1m AS
+SELECT time_bucket('1m', time) AS minute, symbol,
+       first(price, time) AS open, max(price) AS high, min(price) AS low,
+       last(price, time) AS close, sum(quantity) AS volume, count(*) AS trade_count
+FROM trades
+GROUP BY minute, symbol;</code></pre>
+<pre><code class="sh">$ rpk topic produce trades &lt; trades.jsonl
+$ rpk topic consume bars.1m --format '%v'
+{"minute":"2024-01-02 09:30:00.000","symbol":"BTC","open":42011.5,"high":42020,"low":42011.5,"close":42020,"volume":0.75,"trade_count":2}
+…</code></pre>
+<p>The view is plain <a href="sql.html">brrrrr SQL</a>: the same query over a file of the same trades, as a backfill or a research notebook runs it, gives the same bars. The engine is the same.</p>
+<pre><code class="sh">$ brrrrr sql -t trades=trades.jsonl "SELECT time_bucket('1m', time) AS minute, symbol, first(price, time) AS open, … FROM trades GROUP BY minute, symbol"</code></pre>
+<p><code>brrrrr validate bars.sql</code> checks that a pipeline parses and every view compiles, and lists its sources (<code>&lt;-</code>) and sinks (<code>-&gt;</code>), without connecting to anything.</p>
+
+<h2 id="exactly-once">Exactly once</h2>
+<p>Every <code>--interval</code> (10 s), brrrrr writes a checkpoint: the state of every open window, how far it has read each source partition, and how far each sink partition was written, as one file. On a restart it restores the newest checkpoint, reads each sink partition from the checkpointed offset to its end, and replays the sources from their checkpointed offsets; each message the replay produces again that is already in its topic is not written a second time. A message is known by its <code>redpanda-dedup-key</code> header if the sink gives it one (<a href="#sinks">below</a>), otherwise by its payload: a bar names its window and symbol, so it is unique.</p>
+<ul>
+<li><strong>Stopping.</strong> SIGTERM or Ctrl-C takes a last checkpoint and releases the pipeline, so a restart has nothing to replay.</li>
+<li><strong>Two instances.</strong> A checkpoint is also a lease. An instance started while another still runs the same pipeline (a rolling deploy, a pod not yet dead) waits until that one stops or misses three checkpoints (<code>--takeover</code>), then takes over. Two never write at once.</li>
+<li><strong>A changed SQL file</strong> starts from scratch: its checkpoints are kept under a hash of the file. Without a checkpoint, brrrrr replays what the sources still hold and reads the sinks back as far (at least <code>--lookback</code> hours), so it still writes nothing twice.</li>
+<li><strong>The first start</strong> does not write the windows that began before a source's oldest record: part of their input may be missing. It judges by the Kafka records' timestamps, so a producer that stamps records with their events' times gives whole windows from the first one. Records stamped when they were produced (the default) of events from long ago would hold back every window: pass <code>--partial-windows</code> to write them all.</li>
+</ul>
+
+<h2 id="sql">The SQL</h2>
+<p>A pipeline is a file of statements. They declare the topics and streams the way <a href="https://github.com/timeplus-io/proton">Timeplus Proton</a> does (pipelines written for Proton run unchanged); a view's query is brrrrr's own SQL or Proton's.</p>
+<div class="tbl"><table>
+<thead><tr><th>Statement</th><th>Is</th></tr></thead>
+<tbody>
+<tr><td><code>CREATE EXTERNAL STREAM name (columns) SETTINGS type = 'kafka', …</code></td><td>A Kafka topic: a source if it is read, a sink if a view writes into it.</td></tr>
+<tr><td><code>CREATE STREAM name (columns)</code></td><td>A stream between views, held in memory.</td></tr>
+<tr><td><code>CREATE MATERIALIZED VIEW name INTO target AS SELECT …</code></td><td>A query over a stream, its rows written into <code>target</code>, a stream or a sink.</td></tr>
+</tbody></table></div>
+<p><code>IF NOT EXISTS</code> is accepted and changes nothing. Views receive rows in the order they are created.</p>
+
+<h3 id="sources">Sources</h3>
+<p>The settings of a Kafka stream: <code>type = 'kafka'</code>, <code>topic</code>, <code>brokers</code> (or <code>--brokers</code>), <code>data_format</code>, and <code>seek_to = 'earliest'</code> (the default: a first start reads the topic from its start) or <code>'latest'</code>. A source's <code>data_format</code> is <code>'JSONEachRow'</code>: each message is one JSON object, read as ClickHouse reads one.</p>
+<ul>
+<li>Fields are matched to the declared columns by name. A field not declared is ignored. A declared one that is missing or <code>null</code> is the column's default (<code>0</code>, <code>''</code>, 1970-01-01), or NULL in a <code>nullable(…)</code> column.</li>
+<li>A datetime is text: <code>2024-01-02 09:30:00.123</code>, or ISO 8601, <code>2024-01-02T09:30:00.123Z</code> or with an offset such as <code>+01:00</code>; without either it is UTC. Or a number: an integer counts the column's own unit since 1970, milliseconds in a <code>datetime64(3)</code>, microseconds in a <code>datetime64(6)</code>, seconds in a <code>datetime</code>; a number with a fraction counts seconds (<code>1704187800.123</code>).</li>
+<li>A number may also come as text (<code>"42.5"</code>), and a non-string value in a <code>string</code> column is its JSON text.</li>
+<li>A message that is not a JSON object, or a value that fits no column (<code>"n/a"</code> as a price, an unreadable time), is skipped, logged (once a second at most) and counted in <code>brrrrr_decode_errors_total</code>.</li>
+</ul>
+<p>Types: <code>int8</code> to <code>int64</code>, <code>uint8</code> to <code>uint64</code>, <code>float32</code>, <code>float64</code>, <code>bool</code>, <code>string</code>, <code>datetime</code>, <code>datetime64(p)</code> (up to microseconds, <code>p</code> ≤ 6), <code>array(t)</code>, <code>nullable(t)</code>, and <code>low_cardinality(t)</code>, which is <code>t</code>. Protobuf sources (<code>data_format = 'ProtobufSingle'</code>, <code>format_schema = 'file:Message'</code>) take the <code>.proto</code> file with <code>--proto</code>.</p>
+
+<h3 id="sinks">Sinks</h3>
+<p>A sink is <code>data_format = 'JSONEachRow'</code> with <code>one_message_per_row = true</code>: one message per row, a JSON object of the sink's columns in their order, a datetime as text in its column's precision. A column <code>_tp_message_headers map(string, string)</code> sets the message's Kafka headers instead of being written; its header <code>redpanda-dedup-key</code> is then the message's identity for <a href="#exactly-once">exactly once</a>, rather than its whole payload:</p>
+<pre><code class="sql">CREATE EXTERNAL STREAM bars_1m (
+  window_start datetime64(3), symbol string, close float64,
+  _tp_message_headers map(string, string) MATERIALIZED
+    cast((['redpanda-dedup-key'], [concat(to_string(window_start), '|', symbol)]), 'map(string, string)')
+) SETTINGS type = 'kafka', topic = 'bars.1m', data_format = 'JSONEachRow', one_message_per_row = true;</code></pre>
+<p>A <code>MATERIALIZED</code> column is computed from the row on every write; a <code>DEFAULT</code> one when the view has no column of its name. A sink column the view does not name gets its type's default.</p>
+
+<h3 id="views">Views</h3>
+<p>A view's query is the SQL <code>brrrrr sql</code> takes (<a href="sql.html">the reference</a>), with the pipeline's streams as its tables: <code>WHERE</code>, <code>GROUP BY time_bucket(width, time)</code> and keys, every aggregate (<code>first(x, time)</code>, <code>last</code>, <code>vwap</code>, percentiles, …), <code>HAVING</code>, <code>ASOF JOIN</code> of another stream, <code>CASE</code>, CTEs and subqueries:</p>
+<pre><code class="sql">CREATE MATERIALIZED VIEW markouts INTO markouts_5m AS
+SELECT time_bucket('5m', t.time) AS minute, t.symbol,
+       avg((t.price - (q.bid + q.ask) / 2) / ((q.bid + q.ask) / 2) * 1e4) AS slippage_bps,
+       count(*) AS trades
+FROM trades t ASOF JOIN quotes q ON t.symbol = q.symbol AND t.time &gt;= q.time
+WHERE t.quantity &gt; 0
+GROUP BY minute, t.symbol
+HAVING count(*) &gt;= 10;</code></pre>
+<ul>
+<li>Its result's columns go into the target's by name; a target column it does not name gets its type's default.</li>
+<li>A window is written once, when a row of a later window arrives (<code>EMIT AFTER WINDOW CLOSE WITH DELAY INTERVAL '1' SECOND</code> after the query waits that much longer). The pipeline's clock is the newest event time it has read, and rows should come in about time order: a row for a window already written is late, dropped and counted in <code>brrrrr_late_events_total</code>. A stream that goes quiet keeps its last window open until its next row; <code>--idle-close</code> closes it after that many seconds of silence.</li>
+<li>A stream never ends, so what needs a whole table is refused, with what to write instead: <code>GROUP BY</code> without <code>time_bucket</code> (a total over every row), a <code>JOIN</code> on keys alone (a lookup of the whole right table), an <code>ASOF JOIN</code> at a time offset, <code>ORDER BY</code> and <code>LIMIT</code>, and files as tables.</li>
+</ul>
+<h3 id="proton">Views in Proton's dialect</h3>
+<p>A view that groups over <code>tumble(...)</code>, and one that does not group, is read as Proton reads it:</p>
+<pre><code class="sql">SELECT window_start, symbol, vwap(price, quantity) AS vwap
+FROM tumble(trades, time, 5m)
+GROUP BY window_start, symbol
+EMIT AFTER WINDOW CLOSE WITH DELAY INTERVAL '500' MILLISECOND</code></pre>
+<ul>
+<li><code>tumble(stream, time, width)</code>: back-to-back windows of <code>width</code> (<code>15s</code>, <code>1m</code>, <code>5m</code>, <code>1h</code>, <code>1d</code>; quoted or not) over the datetime column <code>time</code>. Each window has <code>window_start</code> and <code>window_end</code>; group by <code>window_start</code> and your keys. <code>EMIT AFTER WINDOW CLOSE</code> is required.</li>
+<li>Aggregates: <code>count()</code>, <code>sum</code>, <code>avg</code>, <code>min</code>, <code>max</code>, <code>earliest</code> and <code>latest</code> (the first and last value read), <code>vwap(price, size)</code>, <code>twap</code>, <code>arg_min</code>, <code>arg_max</code>, <code>median</code>, <code>quantile(p)(x)</code>, <code>quantile_t_digest(p)(x)</code>, <code>quantile_exact(p)(x)</code>, <code>uniq_exact</code>, <code>stddev</code>, <code>variance</code>, <code>corr</code>, and the <code>_if</code> forms of those of one argument, such as <code>sum_if(quantity, side = 'buy')</code>.</li>
+<li>A windowed view takes no <code>WHERE</code> or <code>HAVING</code>: filter in a view into a <code>CREATE STREAM</code> and window that.</li>
+</ul>
+<p><code>brrrrr validate</code> says what a pipeline does not take, for every view, before it runs.</p>
+
+<h2 id="options">Options</h2>
+<div class="tbl"><table>
+<thead><tr><th>Option</th><th>Default</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>--checkpoints DIR|URL</code> (<code>BRRRRR_CHECKPOINTS</code>)</td><td><code>/var/lib/brrrrr/checkpoints</code></td><td>Where checkpoints go: a directory, or <code>s3://bucket/prefix</code> with the <code>-extended</code> image.</td></tr>
+<tr><td><code>--interval S</code></td><td>10</td><td>Seconds between checkpoints: how much a crash replays.</td></tr>
+<tr><td><code>--brokers HOST:PORT</code></td><td>the SQL's</td><td>The Kafka brokers of every stream; <code>--sink-brokers</code> for the sinks' alone.</td></tr>
+<tr><td><code>--kafka-config KEY=VALUE|@FILE</code></td><td></td><td>A librdkafka setting for every client (<code>security.protocol=sasl_ssl</code>), or a file of them to keep secrets off the command line. Repeatable; <code>--source-kafka-config</code> and <code>--sink-kafka-config</code> for one side.</td></tr>
+<tr><td><code>--metrics ADDR</code></td><td><code>0.0.0.0:9464</code></td><td>Where <code>/metrics</code> (Prometheus) and <code>/health</code> are served.</td></tr>
+<tr><td><code>--partial-windows</code></td><td>off</td><td>On a first start, also write the windows that began before a source's oldest record.</td></tr>
+<tr><td><code>--idle-close S</code></td><td>off</td><td>Close the open windows once the sources have been silent this long.</td></tr>
+<tr><td><code>--fresh</code>, <code>--restore-epoch N</code></td><td></td><td>Start without a checkpoint (still writing nothing twice), or from an older one.</td></tr>
+<tr><td><code>--proto FILE</code></td><td></td><td>The <code>.proto</code> of <code>ProtobufSingle</code> sources.</td></tr>
+</tbody></table></div>
+<p><code>brrrrr run --help</code> lists the rest: event-time alignment across partitions, ASOF joins, closing windows on the clock, sink topic prefixes for running a shadow beside a pipeline.</p>
+<p><code>/metrics</code> counts messages received (<code>brrrrr_received_events_total</code>), sent, late, failing to decode, checkpoints and their size, and the consumer lag. <code>/health</code> answers <code>ok</code> until the pipeline's loop has stalled for two minutes.</p>
+
+<h2 id="kubernetes">On Kubernetes</h2>
+<p>Run each pipeline as a StatefulSet of one, its SQL from a ConfigMap and its checkpoints on a PersistentVolumeClaim at <code>/var/lib/brrrrr</code>. The image runs as uid 65534: set <code>fsGroup: 65534</code> so it can write there. Point the liveness probe at <code>/health</code> on port 9464, and give the pod time to take its last checkpoint on SIGTERM. A rolling deploy is safe: the new pod waits for the old one to release the pipeline. A lost volume is not an outage either: the pipeline starts without a checkpoint and writes nothing twice.</p>
+<pre><code>spec:
+  template:
+    spec:
+      securityContext: { fsGroup: 65534 }
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: brrrrr
+          image: ghcr.io/aperiodic-io/monotile
+          args: [run, /etc/brrrrr/pipeline.sql, --kafka-config, "@/etc/brrrrr-secrets/kafka.properties"]
+          volumeMounts: [{ name: state, mountPath: /var/lib/brrrrr }, …]
+          livenessProbe: { httpGet: { path: /health, port: 9464 } }
+  volumeClaimTemplates:
+    - metadata: { name: state }
+      spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 1Gi } } }</code></pre>
+<p>Checkpoints in an object store instead (<code>--checkpoints s3://bucket/prefix</code>, credentials from <code>AWS_*</code>) work with the published image (<code>ghcr.io/aperiodic-io/monotile</code>, built with object store support) and need no volume.</p>
+
+<h2 id="live-views">Pipelines or live views?</h2>
+<p>The <a href="server.html#live-views">live views</a> of <code>brrrrr serve</code> run the same engine: the simpler choice when the results are for people and dashboards. One server ingests the rows (over HTTP, or from Kafka at least once), keeps the results as tables to query and subscribe to, and writes them to Parquet. <code>brrrrr run</code> is for results that other systems consume from Kafka: written exactly once, from Kafka to Kafka, one process per pipeline, scaled out and redeployed like any other consumer.</p>

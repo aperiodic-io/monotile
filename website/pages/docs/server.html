@@ -1,0 +1,134 @@
+<!-- title: Server · brrrrr | description: brrrrr serve: live tables with their Parquet history, live views, subscriptions, the HTTP API and console, the PostgreSQL protocol for psql and Grafana, Kafka ingest and tokens. -->
+<p class="eyebrow">Reference</p>
+<h1>Server</h1>
+<p class="lede"><code>brrrrr serve</code> is one process that holds today's rows in memory and the rest in Parquet by day, and answers one query over both. It is what kdb+ splits into a tickerplant, a real-time database, a historical database and a gateway.</p>
+<pre><code class="sh">$ brrrrr serve --data ./data
+brrrrr 0.1.0 serving ./data: http://127.0.0.1:4242 (the console, the API), postgresql://127.0.0.1:5433</code></pre>
+
+<h2 id="tables">Live tables</h2>
+<p>Write rows to a table by its name; the first write makes it, its columns and types from the rows. Rows are JSON lines or CSV.</p>
+<pre><code class="sh">$ curl -X POST localhost:4242/write/trades --data-binary @trades.jsonl
+{"table":"trades","rows":2565}
+$ curl -X POST 'localhost:4242/write/trades?format=csv' --data-binary @more.csv</code></pre>
+<p>A table's time is its first timestamp column, or the column <code>?time=</code> names on the first write. Rows written are queried at once. Every write goes to a write-ahead log first, and every <code>--flush</code> interval (a minute by default) rows are moved to Parquet, one file set per day: <code>data/trades/date=2024-01-02/…</code>. A query over <code>trades</code> reads the day files and the rows in memory as one table. A stop flushes; a crash replays the log.</p>
+<p>A write that does not fit the table (a missing column, text where a number goes) is refused whole, with the reason.</p>
+
+<h2 id="live-views">Live views</h2>
+<p>A live view is a query kept up to date. It runs over the rows so far, then on each row as it arrives, and emits each bar as it closes. Its answer is exactly the same query's over the table: the engine is the same.</p>
+<pre><code class="sql">CREATE LIVE VIEW bars AS
+SELECT time_bucket('1m', ts) AS minute, symbol,
+       first(price, ts) AS open, max(price) AS high, min(price) AS low,
+       last(price, ts) AS close, sum(size) AS volume
+FROM trades
+GROUP BY minute, symbol;</code></pre>
+<p>A live view with <code>time_bucket_gapfill</code> fills a group's empty buckets when its next bucket closes. An as-of join at a time offset (<code>t.ts + INTERVAL '5 seconds' &gt;= q.ts</code>) is refused: a live view matches each row as it arrives, before the quote it wants. Run markouts as queries, and window joins (<code>JOIN LATERAL</code>) too. A live view with <code>lead</code> emits a row once its partition's next row arrives.</p>
+<p>What a live view emits is a live table of its own: query it, subscribe to it, or build views on it. Live views survive a restart, picking up where they stopped without repeating a row. <code>DROP VIEW bars</code> removes one.</p>
+
+<h2 id="subscribe">Subscriptions</h2>
+<p>Two kinds, as server-sent events: any HTTP client, <code>curl -N</code>, or <code>EventSource</code> in a browser.</p>
+<pre><code class="sh">$ curl -N localhost:4242/subscribe/bars                      # each new row of a table or live view
+data: {"minute":"2024-01-02T09:31:00Z","symbol":"BTC","open":42011.5,…}
+
+$ curl -N 'localhost:4242/watch?q=SELECT%20count(*)%20FROM%20trades&amp;every=1s'   # a query's answer when it changes
+data: {"columns":["count(*)"],"types":["uint"],"rows":[[2565]],"elapsed_ms":0.4}</code></pre>
+<pre><code class="js">const bars = new EventSource("http://localhost:4242/subscribe/bars");
+bars.onmessage = (e) =&gt; chart.update(JSON.parse(e.data));</code></pre>
+
+<h2 id="http">HTTP API</h2>
+<div class="tbl"><table>
+<thead><tr><th>Route</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>GET /</code></td><td>The console: a query editor (<kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Enter</kbd> runs) with typed results and charts, the tables and live views with their columns, a stream of a table's new rows, and your query history. <code>/#q=&lt;SQL&gt;</code> links to a query.</td></tr>
+<tr><td><code>POST /query</code> (body), <code>GET /query?q=</code></td><td>Runs a statement. JSON <code>{columns, types, rows, elapsed_ms}</code> by default; <code>?format=csv|jsonl|parquet|table</code>; <code>?limit=</code> caps the rows.</td></tr>
+<tr><td><code>POST /write/&lt;table&gt;</code></td><td>Appends JSON lines, or CSV with <code>?format=csv</code> or a CSV content type; <code>?time=</code> names the time column of a new table.</td></tr>
+<tr><td><code>GET /subscribe/&lt;table&gt;</code></td><td>New rows as server-sent events.</td></tr>
+<tr><td><code>GET /watch?q=&lt;query&gt;&amp;every=1s</code></td><td>A query's answer each time it changes.</td></tr>
+<tr><td><code>GET /tables</code></td><td>Tables and views: columns, rows in memory, files.</td></tr>
+<tr><td><code>POST /flush</code></td><td>Moves rows in memory to Parquet now.</td></tr>
+<tr><td><code>GET /metrics</code></td><td>Prometheus metrics: queries, errors, rows written and flushed, view rows, uptime.</td></tr>
+<tr><td><code>GET /health</code></td><td><code>ok</code>, without a token: for load balancers and orchestrators.</td></tr>
+</tbody></table></div>
+
+<h2 id="postgres">PostgreSQL protocol</h2>
+<p>Clients that speak PostgreSQL connect, with the token (if the server has one) as the password, any user and database name, and TLS off. brrrrr answers in its own SQL, not PostgreSQL's; what a driver sends to set itself up (<code>SET</code>, <code>BEGIN</code>, <code>SHOW server_version</code>, <code>SELECT version()</code>, <code>current_schema()</code>) is answered as PostgreSQL 16 would.</p>
+<pre><code class="sh">$ psql "postgresql://localhost:5433/brrrrr" -c "SELECT * FROM bars ORDER BY minute DESC LIMIT 5"</code></pre>
+<pre><code class="py">import datetime, psycopg
+with psycopg.connect("postgresql://localhost:5433/brrrrr") as con:
+    since = datetime.datetime(2024, 1, 2, 9, 30, tzinfo=datetime.timezone.utc)
+    rows = con.execute("SELECT symbol, last(price, ts) AS last FROM trades WHERE ts &gt; %s GROUP BY symbol", [since]).fetchall()</code></pre>
+<p>Times come back as <code>timestamptz</code>, integers as <code>int8</code>, other numbers as <code>float8</code>, NULL as NULL, and an error with brrrrr's message. A query's parameters (<code>$1</code>, <code>%s</code>, <code>?</code>) may be text, integers, floats, booleans, dates and timestamps, sent as text or binary; a time may carry a zone (<code>2024-01-02T09:30:00Z</code>, <code>+01:00</code>). Tested with each of these clients:</p>
+<div class="tbl"><table>
+<thead><tr><th>Client</th><th>Works</th></tr></thead>
+<tbody>
+<tr><td><code>psql</code></td><td>Yes.</td></tr>
+<tr><td>Python: psycopg 3, psycopg2</td><td>Yes, prepared statements and binary results included.</td></tr>
+<tr><td>Java: the PostgreSQL JDBC driver (42.7)</td><td>Yes. <code>DatabaseMetaData</code> (a tool's tree of tables) reads <code>pg_catalog</code>, which brrrrr does not have.</td></tr>
+<tr><td>Node.js: node-postgres (<code>pg</code>)</td><td>Yes. As from PostgreSQL, <code>int8</code> values come as strings unless you set its type parser.</td></tr>
+<tr><td>Go: pgx (v5)</td><td>Yes. With parameters, set <code>default_query_exec_mode=exec</code> (or <code>simple_protocol</code>) in the connection string: pgx's default asks the server to infer each parameter's type, which brrrrr does not.</td></tr>
+<tr><td>Rust: tokio-postgres</td><td>Yes. A statement with parameters is described before they are bound, so its columns come as text.</td></tr>
+<tr><td>Grafana (13)</td><td>Yes: the data source's health check, and panels with Grafana's time macros (below).</td></tr>
+</tbody></table></div>
+<h3 id="grafana">Grafana</h3>
+<p>Add a PostgreSQL data source, in the UI or provisioned from a file in <code>provisioning/datasources/</code>:</p>
+<pre><code>apiVersion: 1
+datasources:
+  - name: brrrrr
+    uid: brrrrr
+    type: grafana-postgresql-datasource
+    url: localhost:5433
+    user: brrrrr
+    jsonData: { database: brrrrr, sslmode: disable, postgresVersion: 1600 }
+    secureJsonData: { password: change-me }   # the server's token, if it has one</code></pre>
+<p>A time-series panel of a live view, one series per symbol, and one of the trades in five-minute buckets. <code>$__timeFilter</code>, <code>$__timeFrom()</code>, <code>$__timeTo()</code> and <code>$__timeGroupAlias</code> work; <code>$__unixEpochFilter</code> is for columns of epoch numbers, which a time column is not:</p>
+<pre><code class="sql">SELECT minute AS time, symbol, close
+FROM bars
+WHERE $__timeFilter(minute)
+ORDER BY minute</code></pre>
+<pre><code class="sql">SELECT $__timeGroupAlias(ts, '5m'), symbol AS metric, avg(price) AS price
+FROM trades
+WHERE $__timeFilter(ts)
+GROUP BY 1, 2
+ORDER BY 1</code></pre>
+
+<h2 id="kafka">Kafka</h2>
+<p>Ingest topics into live tables, one JSON object per message (Redpanda and other Kafka-compatible brokers work the same):</p>
+<pre><code class="sh">$ brrrrr serve --kafka localhost:9092 --ingest trades=md.trades --ingest quotes=md.quotes</code></pre>
+<p>For pipelines that produce to Kafka exactly once, see <a href="streaming.html">streaming pipelines</a>.</p>
+
+<h2 id="history">History kept elsewhere</h2>
+<p>Name archive locations as tables beside the live ones: a query over both joins today's rows with years of history in S3.</p>
+<pre><code class="sh">$ brrrrr serve --data ./data -t history=s3://archive/trades/</code></pre>
+
+<h2 id="shared">A shared server</h2>
+<p>One heavy query must not hold up everyone else, nor the rows being written:</p>
+<ul>
+<li><strong>A time limit.</strong> A statement that runs longer than <code>--query-timeout</code> (5 minutes by default) stops, saying so. A PostgreSQL session lowers it for itself with <code>SET statement_timeout = '30s'</code> (a number is milliseconds).</li>
+<li><strong>Cancellation.</strong> A query stops when its client gives up: an HTTP client that closes its connection (the console's <em>Stop</em>, an interrupted <code>curl</code>, a closed tab), or a PostgreSQL CancelRequest (Ctrl-C in <code>psql</code>, a driver's cancel). It stops as it reads its next rows; a last step over everything read (sorting, exact percentiles) finishes first.</li>
+<li><strong>Turns.</strong> At most <code>--max-queries</code> statements run at once; the others wait their turn, within their time limit. If 16 times as many already wait, a new one is refused at once with <em>the server is busy</em>. Writes, Kafka ingest and live views never wait for a turn.</li>
+</ul>
+<p><code>/metrics</code> counts the statements stopped by each cause (<code>brrrrr_statements_timed_out_total</code>, <code>_canceled_total</code>, <code>_abandoned_total</code>), those refused (<code>brrrrr_statements_refused_busy_total</code>), and those running and waiting now.</p>
+
+<h2 id="security">Security</h2>
+<p>By default the server listens on 127.0.0.1 only. Before listening on other addresses, set a token: clients give it as <code>Authorization: Bearer &lt;token&gt;</code> over HTTP and as the password over PostgreSQL. Without one, anyone who reaches the ports may read and write. Put TLS in front with a reverse proxy.</p>
+
+<h2 id="options">Options</h2>
+<div class="tbl"><table>
+<thead><tr><th>Option</th><th>Environment</th><th>Default</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>--data DIR</code></td><td><code>BRRRRR_DATA</code></td><td><code>brrrrr-data</code></td><td>Where live tables keep their Parquet and logs.</td></tr>
+<tr><td><code>--http ADDR</code></td><td><code>BRRRRR_HTTP</code></td><td><code>127.0.0.1:4242</code></td><td>The HTTP API and console.</td></tr>
+<tr><td><code>--pg ADDR</code></td><td><code>BRRRRR_PG</code></td><td><code>127.0.0.1:5433</code></td><td>The PostgreSQL protocol; <code>off</code> for none.</td></tr>
+<tr><td><code>--token T</code></td><td><code>BRRRRR_TOKEN</code></td><td>none</td><td>The token clients must give.</td></tr>
+<tr><td><code>--flush D</code></td><td></td><td><code>60s</code></td><td>How often rows in memory go to Parquet.</td></tr>
+<tr><td><code>--sync</code></td><td></td><td>off</td><td>fsync each write before answering: nothing written is lost even if the machine fails.</td></tr>
+<tr><td><code>-t NAME=LOCATION</code></td><td></td><td></td><td>A location as a table.</td></tr>
+<tr><td><code>--kafka BROKERS</code>, <code>--ingest TABLE=TOPIC</code></td><td><code>BRRRRR_KAFKA</code></td><td></td><td>Kafka ingest.</td></tr>
+<tr><td><code>--threads N</code></td><td></td><td>CPUs</td><td>Threads per query.</td></tr>
+<tr><td><code>--query-timeout D</code></td><td></td><td><code>5m</code></td><td>How long a client's statement may take, its wait for a turn included; <code>0s</code> for no limit.</td></tr>
+<tr><td><code>--max-queries N</code></td><td></td><td>4</td><td>Client statements that run at once; the others wait their turn.</td></tr>
+</tbody></table></div>
+
+<h2 id="docker">In Docker</h2>
+<pre><code class="sh">$ docker run -d -p 4242:4242 -p 5433:5433 -v brrrrr-data:/var/lib/brrrrr -e BRRRRR_TOKEN=change-me \
+    ghcr.io/aperiodic-io/monotile serve --data /var/lib/brrrrr/serve --http 0.0.0.0:4242 --pg 0.0.0.0:5433</code></pre>
+<p>The image runs as an unprivileged user (uid 65534), which owns <code>/var/lib/brrrrr</code>: keep the data there. With Kafka and Grafana: <a href="https://github.com/aperiodic-io/monotile/tree/main/examples/live-dashboard">a live dashboard in one <code>docker compose up</code></a>.</p>

@@ -1,0 +1,63 @@
+# Live market data through brrrrr into Grafana: `docker compose up`, then open
+# http://localhost:3000 (the dashboard) and http://localhost:4242 (brrrrr's console).
+name: brrrrr-live-dashboard
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:v26.2.1
+    command: redpanda start --mode dev-container --smp 1 --memory 512M --reserve-memory 0M --check=false
+      --kafka-addr 0.0.0.0:9092 --advertise-kafka-addr redpanda:9092
+    healthcheck:
+      test: rpk cluster health | grep -q 'Healthy:.*true'
+      interval: 2s
+      retries: 30
+
+  topics:
+    image: redpandadata/redpanda:v26.2.1
+    # the topics, unless they exist (a second `up`)
+    entrypoint: ["sh", "-c", "rpk -X brokers=redpanda:9092 topic create trades quotes || rpk -X brokers=redpanda:9092 topic describe trades quotes >/dev/null"]
+    depends_on: { redpanda: { condition: service_healthy } }
+
+  # synthetic trades and quotes of three symbols, a random walk, about 60 trades a second
+  feed:
+    image: redpandadata/redpanda:v26.2.1
+    entrypoint: bash /feed.sh
+    volumes: [./feed.sh:/feed.sh:ro]
+    depends_on: { topics: { condition: service_completed_successfully } }
+
+  brrrrr:
+    image: ${BRRRRR_IMAGE:-ghcr.io/aperiodic-io/monotile:latest}
+    # or this repository's build:
+    # build: { context: ../.., args: { CARGO_ARGS: "" } }
+    command: serve --data /var/lib/brrrrr/serve --http 0.0.0.0:4242 --pg 0.0.0.0:5433
+      --kafka redpanda:9092 --ingest trades=trades --ingest quotes=quotes
+    ports: ["4242:4242", "5433:5433"]
+    # the image runs as uid 65534, which owns /var/lib/brrrrr
+    volumes: [brrrrr-data:/var/lib/brrrrr]
+    depends_on: { topics: { condition: service_completed_successfully } }
+
+  # the live views, once the topics' first rows made the tables (CREATE OR REPLACE: a restart
+  # keeps the views it has)
+  views:
+    image: curlimages/curl:latest
+    entrypoint: sh /views.sh
+    volumes: [./views.sh:/views.sh:ro, ./views.sql:/views.sql:ro]
+    depends_on: [brrrrr, feed]
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    ports: ["3000:3000"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: 1s
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/market.json
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning.yaml:/etc/grafana/provisioning/datasources/brrrrr.yaml:ro
+      - ./grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/brrrrr.yaml:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [brrrrr]
+
+volumes:
+  brrrrr-data:

@@ -1,0 +1,33 @@
+<!-- title: Benchmarks · brrrrr | description: brrrrr against DuckDB, Polars and ClickHouse on a day of 10 million trades and 20 million quotes: time and memory per query, including where brrrrr is slower. -->
+<p class="eyebrow">Benchmarks</p>
+<h1>Where brrrrr is fast, and where it is not</h1>
+<p class="lede">brrrrr against the engines people use on one machine (DuckDB, Polars, ClickHouse's <code>clickhouse-local</code>), each query written as that engine's users write it. Where brrrrr is slower is below too.</p>
+
+<h2 id="sql">Ad-hoc SQL over Parquet</h2>
+<p>A synthetic day of 10 million trades and 20 million quotes over 100 symbols (activity skewed as markets are), in Parquet with zstd. Each query runs as a user runs it, in a fresh process timed whole: <code>brrrrr sql "…"</code>; DuckDB's SQL from Python; Polars' own API over lazy scans (<code>group_by_dynamic</code> for bars, <code>join_asof</code> for as-of joins); ClickHouse's SQL in <code>clickhouse-local</code> (<code>toStartOfMinute</code>, <code>argMax</code>, <code>ASOF JOIN</code>). Median of three, 8 threads each; every engine's answer is checked to have the same rows as brrrrr's. Seconds, lower is better; the fastest in bold.</p>
+{{bench_legend}}
+<div class="bench">{{bench_all}}</div>
+<div class="tbl"><table>
+<thead>{{bench_head}}</thead>
+<tbody>{{bench_table}}</tbody>
+</table></div>
+<p>What the numbers say:</p>
+<ul>
+<li><strong>Time-bucketed aggregates are faster.</strong> Bars and VWAP stream through the table in time order and close each bucket as it ends: 1.6x DuckDB.</li>
+<li><strong>As-of joins per symbol are faster, in half the memory.</strong> The join runs per symbol, side by side.</li>
+<li><strong>Plain scans and group-bys are slower,</strong> and take more memory: DuckDB's vectorized hash aggregation is very good, and brrrrr reads rows into its streaming engine's form. This is the next thing we are working on.</li>
+<li><strong>A global aggregate after an as-of join is slower:</strong> it cannot run per symbol.</li>
+</ul>
+<details><summary>The queries</summary>
+<pre><code class="sql">{{bench_sql}}</code></pre>
+</details>
+<p>Reproduce it with <a href="https://github.com/aperiodic-io/monotile/tree/main/bench/sql">bench/sql</a>: <code>gen.py</code> makes the data, <code>bench.py</code> times every engine; each engine's version of the queries is there to read (<code>polars_queries.py</code>, <code>clickhouse_queries.sql</code>).</p>
+
+<h2 id="method">Method</h2>
+<ul>
+<li>Same machine, same files from the page cache, nothing else running.</li>
+<li>Whole processes, as a user runs a query: start-up, planning and reading included.</li>
+<li>Peak memory is the process's maximum resident set.</li>
+<li>Answers compared, so neither side skips work.</li>
+</ul>
+<p>Found a query where brrrrr is slow? <a href="https://github.com/aperiodic-io/monotile/issues/new">Tell us</a>; it is how the engine gets faster.</p>

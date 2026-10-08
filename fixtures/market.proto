@@ -1,0 +1,114 @@
+// An example schema of market-data messages, for pipelines whose Kafka sources are protobuf
+// (`data_format = 'ProtobufSingle'`, `format_schema = 'market:Trade'`, `brrrrr run --proto
+// market.proto`). brrrrr reads any flat proto3 schema of scalar and repeated scalar fields; a
+// stream's declared columns are matched to a message's fields by name. Times are microseconds
+// since the Unix epoch.
+syntax = "proto3";
+
+package market.v1;
+
+message Trade {
+  int64 time = 1;
+  string id = 2;
+  int64 exchange = 3;
+  string symbol = 4;
+  double price = 5;
+  int64 local_timestamp = 6;
+  string side = 7;
+  double quantity = 8;
+  double amount = 9;
+}
+
+message Quote {
+  int64 time = 1;
+  int64 exchange = 2;
+  string symbol = 3;
+  double bid_price = 4;
+  double bid_amount = 5;
+  double ask_price = 6;
+  double ask_amount = 7;
+  int64 local_timestamp = 8;
+}
+
+// An order book change: a snapshot, or the levels that changed (an amount of 0 removes a level).
+message BookUpdate {
+  int64 time = 1;
+  int64 exchange = 2;
+  string symbol = 3;
+  bool is_snapshot = 4;
+  int64 local_timestamp = 5;
+  repeated double bid_price = 6;
+  repeated double bid_amount = 7;
+  repeated double ask_price = 8;
+  repeated double ask_amount = 9;
+  // The venue's book version after this message, 0 where it has none: a book's messages are
+  // ordered by it.
+  int64 venue_sequence = 10;
+}
+
+// The top levels of a book, as a venue publishes them whole.
+message BookSnapshot {
+  int64 time = 1;
+  int64 exchange = 2;
+  string symbol = 3;
+  int64 local_timestamp = 4;
+  repeated double bid_price = 5;
+  repeated double bid_amount = 6;
+  repeated double ask_price = 7;
+  repeated double ask_amount = 8;
+}
+
+message Liquidation {
+  int64 time = 1;
+  int64 exchange = 2;
+  string symbol = 3;
+  double price = 4;
+  int64 local_timestamp = 5;
+  string side = 6;
+  double quantity = 7;
+  double amount = 8;
+  string id = 9;
+}
+
+message OpenInterest {
+  int64 time = 1;
+  int64 exchange = 2;
+  string symbol = 3;
+  int64 local_timestamp = 4;
+  double open_interest = 5;
+}
+
+message MarkPrice {
+  int64 time = 1;
+  int64 exchange = 2;
+  string symbol = 3;
+  double mark_price = 4;
+  int64 local_timestamp = 5;
+}
+
+message IndexPrice {
+  int64 time = 1;
+  int64 exchange = 2;
+  string symbol = 3;
+  double index_price = 4;
+  int64 local_timestamp = 5;
+}
+
+message FundingRate {
+  int64 time = 1;
+  int64 exchange = 2;
+  string symbol = 3;
+  double funding_rate = 4;
+  int64 local_timestamp = 5;
+}
+
+// Long and short positioning, as derivatives venues publish it.
+message LongShortRatio {
+  int64 time = 1;
+  int64 exchange = 2;
+  string symbol = 3;
+  double long_short_ratio = 4;
+  double long_share = 5;
+  double short_share = 6;
+  int64 local_timestamp = 7;
+}

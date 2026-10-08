@@ -1,0 +1,66 @@
+[package]
+name = "brrrrr-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = "1"
+brrrrr-core = { path = "../crates/brrrrr-core" }
+libfuzzer-sys = "0.4"
+postcard = { version = "1", features = ["alloc"] }
+zstd = { version = "0.13", default-features = false }
+
+[workspace]
+
+[[bin]]
+name = "sql"
+path = "fuzz_targets/sql.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proto"
+path = "fuzz_targets/proto.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "format"
+path = "fuzz_targets/format.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "engine"
+path = "fuzz_targets/engine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "restore"
+path = "fuzz_targets/restore.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checkpoint"
+path = "fuzz_targets/checkpoint.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "query"
+path = "fuzz_targets/query.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,117 @@
+<!-- title: Files and object stores · brrrrr | description: How brrrrr reads and writes Parquet, CSV and JSON on local disk, S3 (and MinIO, R2), Google Cloud Storage, Azure and HTTP: globs, Hive partitions, schema inference, credentials and the cache. -->
+<p class="eyebrow">Reference</p>
+<h1>Files and object stores</h1>
+<p class="lede">brrrrr queries files where they are. There is no load step and no format of its own: what you query is what you keep, and what it writes any tool reads.</p>
+
+<h2 id="formats">Formats</h2>
+<div class="tbl"><table>
+<thead><tr><th>Format</th><th>Read</th><th>Write</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>Parquet</td><td class="yes">yes</td><td class="yes">yes</td><td>Columns are read in parallel, row groups decoded side by side. Written with zstd.</td></tr>
+<tr><td>CSV</td><td class="yes">yes</td><td class="yes">yes</td><td>Header and types inferred; comma, tab, semicolon or pipe found by itself; <code>.gz</code> read as it streams.</td></tr>
+<tr><td>JSON lines</td><td class="yes">yes</td><td class="yes">yes</td><td>One object per line (<code>.json</code>, <code>.jsonl</code>, <code>.ndjson</code>).</td></tr>
+<tr><td>Databento DBN</td><td class="yes">yes</td><td>no</td><td><code>.dbn</code>, <code>.dbn.zst</code> (<a href="#dbn">below</a>).</td></tr>
+</tbody></table></div>
+<p>The format comes from the name. For a file named otherwise, say it: <code>read_parquet('…')</code>, <code>read_csv('…', delim = '|')</code>, <code>read_json('…')</code>. DuckDB's <code>read_csv_auto</code>, <code>read_ndjson</code> and <code>parquet_scan</code> work too.</p>
+
+<h3 id="options">Reader options</h3>
+<p>DuckDB's options, after the path: <code>read_csv('export.txt', header = false, skip = 1, delim = ';', nullstr = ['NA', 'null'])</code>.</p>
+<div class="tbl"><table>
+<thead><tr><th>Option</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>header</code>, <code>delim</code>, <code>quote</code>, <code>escape</code>, <code>skip</code></td><td>The file's layout (lines skipped before the header). Without a header the columns are <code>column0</code>, <code>column1</code>, ...</td></tr>
+<tr><td><code>types = {'ts': 'TIMESTAMP'}</code></td><td>Some columns' types; <code>columns = {'a': 'BIGINT', ...}</code> names and types them all.</td></tr>
+<tr><td><code>timestampformat = '%d/%m/%Y %H:%M'</code></td><td>How times are written (<code>%Y %m %d %H %M %S</code>, <code>%f</code> µs, <code>%n</code> ns).</td></tr>
+<tr><td><code>nullstr</code></td><td>The texts that are NULL (by default an empty field).</td></tr>
+<tr><td><code>union_by_name = true</code></td><td>Files whose columns differ, read by name (below).</td></tr>
+</tbody></table></div>
+<p>Text that is all times is read as times: ISO 8601, kdb+'s <code>2024.01.02D09:30:00.123456789</code>, nanoseconds kept to the microsecond. Times written as numbers since the epoch, as many exchanges' downloads have them, are read with their unit, and stream in time order like any time column:</p>
+<pre><code class="sql">SELECT time_bucket('1m', timestamp) AS minute, last(price, timestamp) AS close, sum(amount) AS volume
+FROM read_csv('trades_2024-01-01_BTCUSDT.csv.gz', types = {'timestamp': 'TIMESTAMP_US'})
+GROUP BY minute;</code></pre>
+<p>A value that is not of its column's type is an error that names the file, the line and the column.</p>
+
+<h3 id="schemas">Files whose columns differ</h3>
+<p>Across a glob or a directory, the columns are the first file's: one a later file lacks is NULL in its rows, one it adds is left out, and one of another type is an error that says what to write. <code>union_by_name = true</code> reads every file's columns by name, a number of two kinds as a double and anything else as text, as DuckDB does: <code>read_parquet('archive/*.parquet', union_by_name = true)</code>.</p>
+
+<h2 id="locations">Locations</h2>
+<pre><code class="sql">FROM 'trades.parquet';                         -- a file
+FROM 'archive/2024-01-*.csv.gz';               -- a glob (* ? [..] and ** for any depth)
+FROM 'trades/';                                -- a directory: every file under it
+FROM 's3://bucket/trades/date=2024-01-02/';    -- S3, MinIO, Cloudflare R2
+FROM 'gs://bucket/trades/*.parquet';           -- Google Cloud Storage
+FROM 'az://container/trades/*.parquet';        -- Azure Blob Storage (also abfss://)
+FROM 'https://example.com/trades.csv';         -- any URL</code></pre>
+
+<h3 id="hive">Hive partitions</h3>
+<p>A directory of <code>key=value</code> folders, as Spark, Hive and most archives lay out data, gives each folder's keys as columns:</p>
+<pre class="out">trades/
+  date=2024-01-02/symbol=BTC/part-0.parquet
+  date=2024-01-02/symbol=ETH/part-0.parquet
+  date=2024-01-03/…</pre>
+<pre><code class="sql">SELECT date, symbol, count(*) FROM 's3://bucket/trades/' GROUP BY date, symbol;</code></pre>
+<p>A <code>WHERE</code> on a partition key reads only the folders it names.</p>
+
+<h3 id="tables">Iceberg and Delta tables</h3>
+<p>An Apache Iceberg or Delta Lake table is read as its metadata says, from a directory or a store, with no catalog or service in between:</p>
+<pre><code class="sql">FROM delta_scan('s3://bucket/lake/trades');                -- Delta Lake: its _delta_log
+FROM iceberg_scan('s3://bucket/warehouse/db/trades');      -- Iceberg: its newest metadata
+FROM iceberg_scan('…/metadata/00002-….metadata.json');     -- Iceberg: that snapshot
+FROM 's3://bucket/lake/trades';                            -- either, found by what is there</code></pre>
+<p>A Delta table is its log replayed from its latest checkpoint: the files added and not removed since, their partition values from the log. An Iceberg table is its current snapshot's data files, from its manifests; a table copied elsewhere is read where it is. A <code>WHERE</code> on the partitions (Delta's, Iceberg's identity partitions) reads only theirs, as for Hive directories. What changes rows beyond their files is refused with a message rather than misread: Delta's deletion vectors and column mapping, Iceberg's delete files (compact the table first).</p>
+
+<h3 id="dbn">Databento DBN</h3>
+<p>DBN files, as <a href="https://databento.com/docs/standards-and-conventions/databento-binary-encoding">Databento</a> delivers US equities and futures data, are read as they are, zstd-compressed or not, from a disk or a store: the trades, tbbo, mbp-1, mbp-10, mbo and ohlcv schemas. Their columns are those of Databento's own CSV and Parquet exports: <code>ts_recv</code> and <code>ts_event</code> as times (nanoseconds read to the microsecond), prices as numbers (<code>185.64</code>, not <code>185640000000</code>), <code>bid_px_00</code> and its kin for the book's levels, and <code>symbol</code>, each record's instrument as the file's symbology maps it (its <code>instrument_id</code> stays too).</p>
+<pre><code class="sql">-- one-minute bars from a day of trades
+SELECT time_bucket('1m', ts_event) AS minute, symbol,
+       first(price, ts_event) AS open, max(price) AS high, min(price) AS low,
+       last(price, ts_event) AS close, sum(size) AS volume
+FROM 'xnas-itch-20240102.trades.dbn.zst'
+GROUP BY minute, symbol;
+
+-- each trade with the quote it met
+SELECT t.ts_event, t.symbol, t.price, q.bid_px_00 AS bid, q.ask_px_00 AS ask
+FROM 'xnas-itch-20240102.trades.dbn.zst' t
+ASOF JOIN 'xnas-itch-20240102.mbp-1.dbn.zst' q ON t.symbol = q.symbol AND t.ts_event >= q.ts_event;</code></pre>
+
+<h3 id="time-order">Time order</h3>
+<p>Time-series data is usually written in time order, and brrrrr reads it that way: bars and windows stream through without sorting. Files out of order, or a time column that is not, are sorted once when a query needs it; nothing is misread.</p>
+
+<h2 id="credentials">Credentials</h2>
+<p>brrrrr reads each cloud's settings from the environment, as its own command-line tools do.</p>
+<div class="tbl"><table>
+<thead><tr><th>Store</th><th>Settings</th></tr></thead>
+<tbody>
+<tr><td>S3</td><td><code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_SESSION_TOKEN</code>, <code>AWS_REGION</code>; <code>AWS_SKIP_SIGNATURE=true</code> for public buckets</td></tr>
+<tr><td>MinIO, R2, other S3-compatible stores</td><td>as S3, plus <code>AWS_ENDPOINT_URL</code> (<code>https://&lt;account&gt;.r2.cloudflarestorage.com</code>, <code>http://localhost:9000</code>)</td></tr>
+<tr><td>Google Cloud Storage</td><td><code>GOOGLE_SERVICE_ACCOUNT</code> (a key file's path) or <code>GOOGLE_SERVICE_ACCOUNT_KEY</code> (its JSON)</td></tr>
+<tr><td>Azure</td><td><code>AZURE_STORAGE_ACCOUNT_NAME</code> with <code>AZURE_STORAGE_ACCOUNT_KEY</code> or <code>AZURE_STORAGE_SAS_KEY</code></td></tr>
+</tbody></table></div>
+<p>A refused credential says so, and names the variables to check. An endpoint that does not answer fails within seconds rather than hanging.</p>
+
+<h2 id="cache">The cache</h2>
+<p>A remote file is downloaded once into a cache and read as a local one after. A changed object (a new ETag) is downloaded again. The cache lives in <code>~/.cache/brrrrr</code> (<code>XDG_CACHE_HOME</code>, <code>%LOCALAPPDATA%</code> on Windows), or where <code>BRRRRR_CACHE</code> says.</p>
+<p>A Parquet file of 16 MiB or more in a store is not downloaded: its footer is read, then only the column chunks of the columns and row groups a query reads, several requests at a time. Two columns of ten cost a fifth of the file, and a query of every column, fetched in parallel, comes sooner than one download of the whole: on a store answering in 25 ms at 100 MB/s a connection, two columns of a 200 MB file came in 0.9 s rather than 4.7 s, every column in 2.3 s rather than 5.4 s. The chunks read are kept in the cache like any file, so a query asked again reads none. Smaller files, and CSV and JSON, are downloaded whole, which one request does sooner (<code>BRRRRR_RANGED_FROM</code> sets the size, in bytes).</p>
+<p>It keeps to 10 GiB: past that, the files used least recently are deleted, never one a query is reading, in this process or another sharing the cache. <code>BRRRRR_CACHE_SIZE</code> sets another size (<code>50G</code>, <code>500M</code>); <code>0</code> keeps no cache, each remote file read from a temporary copy deleted when the query is done. To empty it, delete the directory: <code>rm -rf ~/.cache/brrrrr</code>.</p>
+
+<h2 id="writing">Writing</h2>
+<p>Write a result with <code>COPY</code>, or <code>-o</code> on the command line, to a file or straight to an object store. The format comes from the name, or <code>FORMAT</code>:</p>
+<pre><code class="sql">COPY (SELECT * FROM 'trades.csv.gz' WHERE symbol = 'BTC') TO 's3://bucket/btc.parquet';
+COPY bars TO 'bars.csv';
+COPY (FROM 'trades.csv') TO 'out/trades.data' (FORMAT parquet);</code></pre>
+<pre><code class="sh">$ brrrrr sql -f bars.sql -o gs://bucket/bars/2024-01-02.parquet</code></pre>
+<p>Large results go up in parts, so memory stays flat whatever their size.</p>
+<p><code>PARTITION_BY</code> writes a directory of Hive partitions, as DuckDB does: a file per partition, its values in the path rather than in the file. This is how raw files become a date-partitioned archive (kdb+'s HDB), one day or many at a time; a <code>WHERE</code> on the partitions then reads only theirs:</p>
+<pre><code class="sql">COPY (SELECT strftime(ts, '%Y-%m-%d') AS date, * FROM 'raw/trades-*.csv.gz')
+TO 's3://bucket/trades' (FORMAT parquet, PARTITION_BY (date, symbol));
+-- s3://bucket/trades/date=2024-01-02/symbol=BTC/data_0.parquet, ...
+
+COPY (SELECT strftime(ts, '%Y-%m-%d') AS date, * FROM 'raw/trades-2024-01-03.csv.gz')
+TO 's3://bucket/trades' (FORMAT parquet, PARTITION_BY (date, symbol), OVERWRITE_OR_IGNORE);
+
+SELECT symbol, vwap(price, size) FROM 's3://bucket/trades/' WHERE date = '2024-01-03' GROUP BY symbol;</code></pre>
+<p>A directory that holds files is written into only with <code>OVERWRITE_OR_IGNORE</code>, which replaces the partitions written again and keeps the others. Values are escaped as DuckDB escapes them (<code>%20</code> for a space), NULL is <code>__HIVE_DEFAULT_PARTITION__</code>, and both read back as they were.</p>
+<p><code>COPY</code> writes as the query runs: rows are written a row group at a time, the columns of each compressed side by side, so a result of any size is written in a few hundred MiB (10M rows: 0.8 s and 350 MiB, DuckDB 1.4 s and 1.2 GiB). A query ordered by its outermost <code>ORDER BY</code>, or by time across its tables, is whole before it is written. With <code>PARTITION_BY</code>, 100 files are open at most: past them, the least recently written is closed, and its partition's later rows go to a file of the next number (<code>data_1.parquet</code>).</p>
+
+<h2 id="tested">How it is tested</h2>
+<p>Every store is tested against an emulator in CI: MinIO-compatible S3 (versitygw), fake-gcs-server and Azurite, plus plain HTTP. The scenarios cover globs, Hive directories, each format written and read back, changed objects, refused credentials and unreachable endpoints (<a href="https://github.com/aperiodic-io/monotile/blob/main/tests/acceptance/sql/object_stores.feature">object_stores.feature</a>).</p>

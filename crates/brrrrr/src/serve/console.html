@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>brrrrr console</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230b1b26'/%3E%3Cpath d='M4 3v10M8 5v7M12 2v8' stroke='%235cd3f0' stroke-width='2'/%3E%3C/svg%3E">
+<style>
+/* the website's identity (website/assets/site.css): chart paper, a cold palette, candles for the
+   only colour; system fonts, as the binary serves this page offline */
+:root {
+  --paper: #f1f5f7; --grid: rgba(11, 27, 38, 0.055); --surface: #ffffff; --ink: #0b1b26; --muted: #4c6170;
+  --rule: #d3dde3; --accent: #0a7fa8; --accent-ink: #ffffff; --accent-soft: rgba(10, 127, 168, 0.1);
+  --up: #12a27a; --down: #e5484d; --code-bg: #0b1b26; --code-ink: #dbe7ee; --code-rule: #1c3443;
+  --tok-c: #6f8b9b; --row: rgba(11, 27, 38, 0.035);
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #07131b; --grid: rgba(92, 211, 240, 0.045); --surface: #0d1f2b; --ink: #e3eef3; --muted: #94aab8;
+    --rule: #1d3442; --accent: #5cd3f0; --accent-ink: #062130; --accent-soft: rgba(92, 211, 240, 0.12);
+    --up: #2fc497; --down: #ff6369; --code-bg: #0a1821; --code-rule: #1d3442; --row: rgba(92, 211, 240, 0.04);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #07131b; --grid: rgba(92, 211, 240, 0.045); --surface: #0d1f2b; --ink: #e3eef3; --muted: #94aab8;
+  --rule: #1d3442; --accent: #5cd3f0; --accent-ink: #062130; --accent-soft: rgba(92, 211, 240, 0.12);
+  --up: #2fc497; --down: #ff6369; --code-bg: #0a1821; --code-rule: #1d3442; --row: rgba(92, 211, 240, 0.04);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background-color: var(--paper); color: var(--ink); font: 14px/1.45 var(--sans);
+  background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 24px 24px; display: flex; flex-direction: column;
+}
+code, .mono { font-family: var(--mono); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button, select { font: 500 13px var(--sans); border: 1px solid var(--rule); background: var(--surface); color: var(--ink);
+  border-radius: 6px; padding: 6px 11px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 650; }
+button.on { border-color: var(--up); color: var(--up); }
+button.ghost { border-color: transparent; background: transparent; padding: 3px 7px; color: var(--muted); }
+button.ghost:hover { color: var(--accent); }
+
+header { display: flex; align-items: center; gap: 10px; padding: 9px 16px; border-bottom: 1px solid var(--rule); background: var(--surface); }
+.logo { font: 800 18px/1 var(--mono); letter-spacing: -0.03em; display: flex; align-items: center; gap: 8px; }
+.logo svg { width: 18px; height: 18px; }
+.logo small { font: 500 12px var(--sans); color: var(--muted); letter-spacing: 0; }
+.status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.dot.ok { background: var(--up); } .dot.err { background: var(--down); }
+.spacer { flex: 1; }
+#menu { display: none; }
+
+main { flex: 1; min-height: 0; display: grid; grid-template-columns: 280px 1fr; }
+aside { border-right: 1px solid var(--rule); background: var(--surface); overflow: auto; padding: 12px 10px 20px; }
+aside h2 { font: 650 11px var(--sans); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 6px 6px 8px; display: flex; justify-content: space-between; align-items: center; }
+.tbl { border-radius: 7px; padding: 6px 6px 6px 8px; margin-bottom: 2px; }
+.tbl:hover, .tbl.open { background: var(--accent-soft); }
+.tbl .row { display: flex; align-items: center; gap: 4px; }
+.tbl .name { font: 600 13.5px var(--mono); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; text-align: left; border: 0; background: none; padding: 0; color: var(--ink); }
+.tbl .meta { color: var(--muted); font-size: 12px; margin-top: 1px; }
+.kind { font: 600 10px var(--sans); text-transform: uppercase; letter-spacing: .06em; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--rule); color: var(--muted); margin-right: 4px; }
+.kind.view { color: var(--accent); border-color: var(--accent); }
+.cols { margin: 6px 0 2px; display: none; }
+.tbl.open .cols { display: block; }
+.col { display: flex; justify-content: space-between; gap: 8px; width: 100%; border: 0; background: none; color: var(--ink); text-align: left; padding: 2px 4px; border-radius: 4px; font: 12.5px var(--mono); cursor: pointer; }
+.col:hover { background: var(--surface); color: var(--accent); }
+.col span { color: var(--muted); }
+.empty { color: var(--muted); font-size: 13px; padding: 4px 6px 10px; }
+.empty code { font-size: 12px; background: var(--accent-soft); padding: 1px 4px; border-radius: 4px; }
+.hist { display: block; width: 100%; text-align: left; border: 0; background: none; color: var(--muted); font: 12px var(--mono); padding: 5px 6px; border-radius: 6px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist:hover { background: var(--accent-soft); color: var(--ink); }
+
+section.work { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.editor { padding: 14px 16px 8px; }
+textarea { display: block; width: 100%; height: 160px; resize: vertical; border: 1px solid var(--code-rule); border-radius: 8px;
+  padding: 12px 14px; background: var(--code-bg); color: var(--code-ink); font: 13.5px/1.55 var(--mono); outline: none; tab-size: 2; caret-color: #5cd3f0; }
+textarea:focus { box-shadow: 0 0 0 2px var(--accent-soft); border-color: var(--accent); }
+.bar { display: flex; gap: 8px; align-items: center; padding: 0 16px 10px; flex-wrap: wrap; }
+.hint { color: var(--muted); font-size: 12px; }
+kbd { font: 11px var(--mono); border: 1px solid var(--rule); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: var(--surface); }
+.tabs { display: flex; gap: 2px; padding: 0 16px; border-bottom: 1px solid var(--rule); }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 7px 12px; color: var(--muted); }
+.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 650; }
+.tabs .count { font: 11px var(--mono); margin-left: 4px; color: var(--muted); }
+.result { flex: 1; overflow: auto; padding: 12px 16px 16px; min-height: 0; }
+.err { color: var(--down); white-space: pre-wrap; font: 13px/1.5 var(--mono); background: color-mix(in srgb, var(--down) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--down) 35%, transparent); border-left-width: 4px; border-radius: 8px; padding: 10px 12px; }
+.msg { color: var(--muted); padding: 6px 0; }
+.ok-msg { border: 1px solid var(--rule); border-left: 4px solid var(--up); background: var(--surface); border-radius: 8px; padding: 10px 12px; }
+.grid-wrap { border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); overflow: auto; max-height: 100%; }
+table.grid { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; font-size: 13px; }
+table.grid th { position: sticky; top: 0; background: var(--surface); text-align: left; font-weight: 650; border-bottom: 1px solid var(--rule); padding: 7px 12px; white-space: nowrap; }
+table.grid th small { display: block; color: var(--muted); font: 400 11px var(--mono); }
+table.grid td { padding: 4px 12px; border-bottom: 1px solid var(--row); white-space: nowrap; max-width: 40ch; overflow: hidden; text-overflow: ellipsis; }
+table.grid tbody tr:hover td { background: var(--accent-soft); }
+table.grid td.n { text-align: right; font: 13px var(--mono); font-variant-numeric: tabular-nums; }
+table.grid td.t { font: 13px var(--mono); }
+table.grid td.null { color: var(--muted); font-style: italic; }
+table.grid tr.fresh td { animation: fresh 1.2s ease-out; }
+@keyframes fresh { from { background: var(--accent-soft); } }
+.chart { position: relative; height: min(420px, 60vh); border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); }
+.chart-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
+canvas { width: 100%; height: 100%; display: block; }
+.tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 6px 8px; font: 12px var(--mono); box-shadow: 0 4px 16px rgba(0,0,0,.12); display: none; white-space: nowrap; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 8px 2px; font-size: 12px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+.stream-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 13px; }
+.live::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--up); margin-right: 6px; vertical-align: 1px; animation: blink 1.6s infinite; }
+@keyframes blink { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+.welcome { max-width: 46rem; color: var(--muted); }
+.welcome h1 { color: var(--ink); font: 700 20px var(--sans); margin: 4px 0 6px; }
+.welcome pre { background: var(--code-bg); color: var(--code-ink); border-radius: 8px; padding: 10px 12px; font: 12.5px/1.5 var(--mono); overflow-x: auto; }
+@media (max-width: 760px) {
+  main { grid-template-columns: 1fr; }
+  aside { display: none; border-right: 0; border-bottom: 1px solid var(--rule); max-height: 45vh; }
+  body.menu-open aside { display: block; }
+  #menu { display: inline-block; }
+  .logo small, .hint.keys { display: none; }
+  textarea { height: 120px; }
+  header { padding: 8px 10px; gap: 6px; } #status { display: none; } #examples { min-width: 0; width: 7.5rem; } .editor { padding: 10px 10px 6px; } .bar, .tabs { padding-left: 10px; padding-right: 10px; } .result { padding: 10px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <button id="menu" aria-label="Tables and history">☰</button>
+  <div class="logo"><svg viewBox="0 0 16 16" aria-hidden="true"><rect width="16" height="16" rx="3" fill="#0b1b26"/><path d="M4 3v10M8 5v7M12 2v8" stroke="#5cd3f0" stroke-width="2"/></svg>brrrrr <small>console</small></div>
+  <div class="status" title="The server, as this page reaches it"><div class="dot" id="dot"></div><span id="status">connecting…</span></div>
+  <div class="spacer"></div>
+  <select id="examples" aria-label="Example queries"><option value="">Examples…</option></select>
+  <button id="theme" aria-label="Light or dark theme" title="Light or dark theme">◐</button>
+  <button id="token" title="The server's token (its --token)">Token</button>
+</header>
+<main>
+  <aside>
+    <h2>Tables and live views <button class="ghost" id="reload" title="Reload" aria-label="Reload the tables">↻</button></h2>
+    <div id="tables"></div>
+    <h2 style="margin-top:16px">History <button class="ghost" id="clear" title="Clear the history">clear</button></h2>
+    <div id="history"></div>
+  </aside>
+  <section class="work">
+    <div class="editor"><textarea id="sql" spellcheck="false" aria-label="SQL" placeholder="SELECT * FROM trades ORDER BY ts DESC LIMIT 100"></textarea></div>
+    <div class="bar">
+      <button class="primary" id="run">Run</button>
+      <button id="stop" disabled title="Stop the running query">Stop</button>
+      <button id="live" title="Run it again every second, showing each answer that changed">Watch</button>
+      <span class="hint keys"><kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Enter</kbd> runs</span>
+      <div class="spacer"></div>
+      <span class="hint mono" id="timing"></span>
+    </div>
+    <div class="tabs" role="tablist">
+      <button role="tab" id="tab-table" aria-selected="true">Table</button>
+      <button role="tab" id="tab-chart" aria-selected="false">Chart</button>
+      <button role="tab" id="tab-stream" aria-selected="false">Stream<span class="count" id="stream-count"></span></button>
+    </div>
+    <div class="result" id="result"></div>
+  </section>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const store = { get: (k, d) => { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
+                set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+let token = store.get("brrrrr.token", "");
+let tables = [], last = null, tab = "table", watching = null, running = null;
+let stream = { source: null, table: null, columns: null, rows: [] };
+
+const EXAMPLES = {
+  "Latest trades": "SELECT * FROM trades ORDER BY ts DESC LIMIT 100",
+  "1-minute bars": "SELECT time_bucket('1m', ts) AS minute, symbol,\n       first(price, ts) AS open, max(price) AS high, min(price) AS low,\n       last(price, ts) AS close, sum(size) AS volume\nFROM trades\nGROUP BY minute, symbol\nORDER BY minute",
+  "VWAP per 5 minutes": "SELECT time_bucket('5m', ts) AS bucket, symbol, vwap(price, size) AS vwap\nFROM trades GROUP BY bucket, symbol ORDER BY bucket",
+  "Trades with their quote": "SELECT t.ts, t.symbol, t.price, q.bid, q.ask\nFROM trades t ASOF JOIN quotes q ON t.symbol = q.symbol AND t.ts >= q.ts\nORDER BY t.ts DESC LIMIT 100",
+  "A live view of bars": "CREATE LIVE VIEW bars_1m AS\nSELECT time_bucket('1m', ts) AS minute, symbol,\n       first(price, ts) AS open, max(price) AS high, min(price) AS low,\n       last(price, ts) AS close, sum(size) AS volume\nFROM trades GROUP BY minute, symbol",
+  "Tables": "SHOW TABLES",
+};
+for (const name of Object.keys(EXAMPLES)) $("examples").append(new Option(name, name));
+$("examples").onchange = (e) => { if (EXAMPLES[e.target.value]) setSql(EXAMPLES[e.target.value]); e.target.value = ""; $("sql").focus(); };
+
+// theme: the system's, or the one picked here
+const applyTheme = (t) => { if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme; };
+applyTheme(store.get("brrrrr.theme", ""));
+$("theme").onclick = () => {
+  const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  const t = dark ? "light" : "dark"; applyTheme(t); store.set("brrrrr.theme", t); redraw();
+};
+$("menu").onclick = () => document.body.classList.toggle("menu-open");
+
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+const ident = (n) => /^[a-z_][a-z0-9_]*$/.test(n) ? n : `"${n.replace(/"/g, '""')}"`;
+function headers() { return token ? { Authorization: "Bearer " + token } : {}; }
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { ...headers(), ...(opts.headers || {}) } });
+  const body = await r.json().catch(() => ({ error: `${r.status} ${r.statusText}` }));
+  if (r.status === 401) { askToken(); throw new Error(body.error || "a token is needed"); }
+  if (!r.ok || body.error) throw new Error(body.error || r.statusText);
+  return body;
+}
+function askToken() {
+  const t = prompt("This server needs its token (brrrrr serve --token):", token);
+  if (t !== null) { token = t.trim(); store.set("brrrrr.token", token); refreshTables(); }
+}
+$("token").onclick = askToken;
+
+function setSql(text) { $("sql").value = text; store.set("brrrrr.sql", text); }
+function insert(text) {
+  const t = $("sql"), s = t.selectionStart; t.focus(); t.setRangeText(text, s, t.selectionEnd, "end"); store.set("brrrrr.sql", t.value);
+}
+const timeCol = (t) => t.columns.find(c => /timestamp|time/.test(c.type));
+
+async function refreshTables() {
+  try {
+    tables = await api("/tables");
+    $("dot").className = "dot ok"; $("status").textContent = "connected";
+  } catch (e) { $("dot").className = "dot err"; $("status").textContent = e.message === "Failed to fetch" ? "unreachable" : e.message; return; }
+  const box = $("tables"), open = new Set([...box.querySelectorAll(".tbl.open")].map(d => d.dataset.name));
+  box.innerHTML = "";
+  if (!tables.length) {
+    box.innerHTML = '<div class="empty">No tables yet. Write rows:<br><code>curl -X POST localhost:4242/write/trades --data-binary @trades.jsonl</code></div>';
+    if (!$("result").innerHTML) welcome();
+    return;
+  }
+  for (const t of tables) {
+    const d = document.createElement("div"); d.className = "tbl" + (open.has(t.name) ? " open" : ""); d.dataset.name = t.name;
+    const view = t.kind.includes("view");
+    d.innerHTML = `<div class="row"><button class="ghost" data-a="open" aria-label="Columns of ${esc(t.name)}">${open.has(t.name) ? "▾" : "▸"}</button>
+      <button class="name" data-a="name" title="Insert its name">${esc(t.name)}</button>
+      <button class="ghost" data-a="query" title="SELECT * … LIMIT 100">query</button>
+      <button class="ghost" data-a="stream" title="Stream its new rows">stream</button></div>
+      <div class="meta"><span class="kind ${view ? "view" : ""}">${view ? "live view" : esc(t.kind)}</span>${t.rows_in_memory.toLocaleString()} rows in memory · ${t.files} files</div>
+      <div class="cols">${t.columns.map(c => `<button class="col" data-col="${esc(c.name)}" title="Insert"><b>${esc(c.name)}</b><span>${esc(c.type)}</span></button>`).join("")}</div>`;
+    d.onclick = (e) => {
+      const b = e.target.closest("button"); if (!b) return;
+      if (b.dataset.col) return insert(ident(b.dataset.col));
+      if (b.dataset.a === "open") { d.classList.toggle("open"); b.textContent = d.classList.contains("open") ? "▾" : "▸"; }
+      if (b.dataset.a === "name") insert(ident(t.name));
+      if (b.dataset.a === "query") { const tc = timeCol(t); setSql(`SELECT * FROM ${ident(t.name)}${tc ? ` ORDER BY ${ident(tc.name)} DESC` : ""} LIMIT 100`); run(); }
+      if (b.dataset.a === "stream") subscribe(t.name);
+      document.body.classList.remove("menu-open");
+    };
+    box.append(d);
+  }
+}
+$("reload").onclick = refreshTables;
+
+function welcome() {
+  $("result").innerHTML = `<div class="welcome"><h1>Query your live tables and their history</h1>
+    <p>Write rows to a table over HTTP, then query it here: <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Enter</kbd> runs the editor's SQL. A live view keeps a query's answer up to date as rows arrive; <b>stream</b> shows a table's new rows as they come.</p>
+    <pre>curl -X POST ${esc(location.origin)}/write/trades --data-binary @trades.jsonl
+curl ${esc(location.origin)}/query --data "SELECT count(*) FROM trades"</pre>
+    <p>Pick an example from the menu above, or see the docs: <code>brrrrr serve --help</code>.</p></div>`;
+}
+
+// ---- answers
+function fmt(v, type) {
+  if (v === null) return '<td class="null">null</td>';
+  if (type === "float") return `<td class="n">${Number(v).toLocaleString(undefined, { maximumFractionDigits: 8 })}</td>`;
+  if (type === "int" || type === "uint") return `<td class="n">${typeof v === "number" ? v.toLocaleString() : esc(v)}</td>`;
+  if (type === "time") return `<td class="t">${esc(String(v).replace("T", " ").replace("Z", ""))}</td>`;
+  if (type === "bool") return `<td class="t">${v}</td>`;
+  return `<td title="${esc(v)}">${esc(v)}</td>`;
+}
+const SHOWN = 2000;
+function grid(columns, types, rows, fresh = 0) {
+  const head = columns.map((c, i) => `<th>${esc(c)}<small>${esc(types[i] || "")}</small></th>`).join("");
+  const body = rows.slice(0, SHOWN).map((r, j) => `<tr${j < fresh ? ' class="fresh"' : ""}>${r.map((v, i) => fmt(v, types[i])).join("")}</tr>`).join("");
+  return `<div class="grid-wrap"><table class="grid"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>` +
+    (rows.length > SHOWN ? `<div class="msg">The first ${SHOWN.toLocaleString()} of ${rows.length.toLocaleString()} rows are shown.</div>` : "");
+}
+function error(msg) { return `<div class="err" role="alert">${esc(msg)}</div>`; }
+
+function select(t) {
+  tab = t;
+  for (const x of ["table", "chart", "stream"]) $("tab-" + x).setAttribute("aria-selected", x === t);
+  redraw();
+}
+for (const x of ["table", "chart", "stream"]) $("tab-" + x).onclick = () => select(x);
+
+function redraw() {
+  const box = $("result");
+  if (tab === "stream") return drawStream();
+  if (!last) {
+    if (!tables.length) welcome();
+    else box.innerHTML = '<div class="msg">Pick <b>query</b> beside a table for its newest rows, or write SQL above and press <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Enter</kbd>.</div>';
+    return;
+  }
+  if (last.error) { box.innerHTML = error(last.error); return; }
+  if (last.message !== undefined && !last.columns) { box.innerHTML = `<div class="ok-msg">${esc(last.message)}</div>`; return; }
+  if (tab === "chart") {
+    const kind = chartKind(last);
+    if (!kind) { box.innerHTML = '<div class="msg">A chart needs a column of times and a column of numbers, and two rows or more.</div>'; return; }
+    return chart(last, kind);
+  }
+  box.innerHTML = last.rows.length ? grid(last.columns, last.types, last.rows) : `${grid(last.columns, last.types, [])}<div class="msg">No rows.</div>`;
+}
+
+function show(a) {
+  last = a;
+  if (a.error) { $("timing").textContent = ""; }
+  else if (a.rows) $("timing").textContent = `${a.rows.length.toLocaleString()} row${a.rows.length === 1 ? "" : "s"} · ${a.elapsed_ms.toFixed(1)} ms`;
+  else $("timing").textContent = `${a.elapsed_ms.toFixed(1)} ms`;
+  if (a.message !== undefined && !a.columns) refreshTables();
+  if (tab === "stream") select("table"); else redraw();
+}
+
+// ---- running
+function remember(sql) {
+  let h = JSON.parse(store.get("brrrrr.history", "[]")).filter(x => x !== sql); h.unshift(sql); h = h.slice(0, 30);
+  store.set("brrrrr.history", JSON.stringify(h)); renderHistory();
+}
+function renderHistory() {
+  const h = JSON.parse(store.get("brrrrr.history", "[]")), box = $("history"); box.innerHTML = "";
+  if (!h.length) { box.innerHTML = '<div class="empty">The queries you run appear here.</div>'; return; }
+  for (const q of h) {
+    const b = document.createElement("button"); b.className = "hist"; b.textContent = q.replace(/\s+/g, " "); b.title = q;
+    b.onclick = () => { setSql(q); $("sql").focus(); document.body.classList.remove("menu-open"); }; box.append(b);
+  }
+}
+$("clear").onclick = () => { store.set("brrrrr.history", "[]"); renderHistory(); };
+
+async function run() {
+  const sql = $("sql").value.trim(); if (!sql) return;
+  stopWatch(); remember(sql);
+  if (running) running.abort();
+  const ctl = running = new AbortController();
+  $("timing").textContent = "running…"; $("stop").disabled = false; $("run").disabled = true;
+  try { show(await api("/query?limit=10000", { method: "POST", body: sql, signal: ctl.signal })); }
+  catch (e) { show({ error: e.name === "AbortError" ? "Stopped: the server stops the query as it reads its next rows." : e.message }); }
+  finally { if (running === ctl) { running = null; $("stop").disabled = true; $("run").disabled = false; } }
+}
+// closing the request stops the query on the server too
+$("stop").onclick = () => { if (running) running.abort(); stopWatch(); };
+function stopWatch() { if (watching) { watching.close(); watching = null; $("live").classList.remove("on"); $("stop").disabled = !running; } }
+$("live").onclick = () => {
+  if (watching) return stopWatch();
+  const sql = $("sql").value.trim(); if (!sql) return;
+  remember(sql);
+  watching = new EventSource(`/watch?every=1s&q=${encodeURIComponent(sql)}${token ? "&token=" + encodeURIComponent(token) : ""}`);
+  watching.onmessage = (e) => show(JSON.parse(e.data));
+  watching.onerror = () => { $("timing").textContent = "watch: reconnecting…"; };
+  $("live").classList.add("on"); $("stop").disabled = false;
+};
+$("run").onclick = run;
+$("sql").addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); run(); }
+  if (e.key === "Tab" && !e.shiftKey) { e.preventDefault(); insert("  "); }
+});
+$("sql").addEventListener("input", () => store.set("brrrrr.sql", $("sql").value));
+
+// ---- a table's new rows, as they come (server-sent events)
+function subscribe(name) {
+  if (stream.source) stream.source.close();
+  stream = { source: null, table: name, columns: null, rows: [] };
+  stream.source = new EventSource(`/subscribe/${encodeURIComponent(name)}${token ? "?token=" + encodeURIComponent(token) : ""}`);
+  stream.source.onmessage = (e) => {
+    const o = JSON.parse(e.data); stream.columns ??= Object.keys(o);
+    stream.rows.unshift(stream.columns.map(c => o[c] ?? null)); stream.rows.length = Math.min(stream.rows.length, 500); stream.fresh = (stream.fresh || 0) + 1;
+    $("stream-count").textContent = stream.rows.length; if (tab === "stream") drawStream();
+  };
+  stream.source.onerror = () => { if (tab === "stream") drawStream("reconnecting…"); };
+  $("stream-count").textContent = "0"; select("stream");
+}
+function drawStream(note) {
+  const box = $("result");
+  if (!stream.table) { box.innerHTML = '<div class="msg">Pick <b>stream</b> beside a table or live view: its new rows show here as they are written.</div>'; return; }
+  const types = (stream.columns || []).map((c, i) => {
+    const t = tables.find(t => t.name === stream.table)?.columns.find(x => x.name === c)?.type || "";
+    return /time/.test(t) ? "time" : /double|float|real/.test(t) ? "float" : /int/.test(t) ? "int" : "text";
+  });
+  box.innerHTML = `<div class="stream-head"><span class="${stream.source ? "live" : ""}"><b>${esc(stream.table)}</b> — ${stream.source ? (note || "new rows, newest first") : "stopped"}</span>
+    <div class="spacer"></div>${stream.source ? '<button id="unsub">Stop streaming</button>' : ""}</div>` +
+    (stream.columns ? grid(stream.columns, types, stream.rows, stream.fresh) : '<div class="msg">Waiting for the next row…</div>');
+  stream.fresh = 0;
+  const u = $("unsub"); if (u) u.onclick = () => { stream.source.close(); stream.source = null; drawStream(); };
+}
+
+// ---- a chart: a time column against the numbers, a line per key; candles for open/high/low/close
+function chartKind(a) {
+  if (!a.rows || a.rows.length < 2) return null;
+  const t = a.types.indexOf("time"); if (t < 0) return null;
+  const names = a.columns.map(c => c.toLowerCase());
+  if (["open", "high", "low", "close"].every(k => names.includes(k))) return "candles";
+  return a.types.some((ty, i) => i !== t && (ty === "float" || ty === "int" || ty === "uint")) ? "line" : null;
+}
+const PALETTE = ["#0a7fa8", "#e5484d", "#12a27a", "#f2a13d", "#7c5cf0", "#5cd3f0", "#94aab8", "#d6409f"];
+function chart(a, kind) {
+  const box = $("result");
+  box.innerHTML = '<div class="chart"><canvas id="cv" aria-label="Chart of the answer"></canvas><div class="tip" id="tip"></div></div><div class="legend" id="legend"></div>';
+  const cv = $("cv"), ctx = cv.getContext("2d"), dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight; cv.width = W * dpr; cv.height = H * dpr; ctx.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement), color = (v) => css.getPropertyValue(v).trim();
+  const ti = a.types.indexOf("time"), key = a.types.findIndex((ty, i) => i !== ti && ty === "text");
+  const times = a.rows.map(r => Date.parse(r[ti]));
+  const pad = { l: 64, r: 14, t: 14, b: 28 };
+  const series = [];
+  if (kind === "candles") {
+    const ix = ["open", "high", "low", "close"].map(k => a.columns.findIndex(c => c.toLowerCase() === k));
+    const first = key >= 0 ? a.rows[0][key] : null; // one key's candles: the first's
+    series.push({ name: first ?? "price", candles: a.rows.map((r, j) => [times[j], ...ix.map(i => r[i]), key >= 0 ? r[key] : null]).filter(c => c[5] === first && c.slice(1, 5).every(v => v !== null)) });
+  } else {
+    const nums = a.types.map((ty, i) => (i !== ti && (ty === "float" || ty === "int" || ty === "uint")) ? i : -1).filter(i => i >= 0).slice(0, 6);
+    const groups = new Map();
+    a.rows.forEach((r, j) => { const g = key >= 0 ? r[key] : ""; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(j); });
+    for (const [g, rows] of [...groups].slice(0, 8)) for (const i of nums)
+      series.push({ name: (g ? g + " · " : "") + a.columns[i], points: rows.map(j => [times[j], a.rows[j][i]]).filter(p => p[1] !== null && Number.isFinite(p[0])).sort((p, q) => p[0] - q[0]) });
+  }
+  const xs = times.filter(Number.isFinite); let x0 = Math.min(...xs), x1 = Math.max(...xs); if (x0 === x1) x1 = x0 + 1;
+  const ys = series.flatMap(s => s.candles ? s.candles.flatMap(c => [c[2], c[3]]) : s.points.map(p => p[1])).map(Number);
+  let y0 = Math.min(...ys), y1 = Math.max(...ys); if (y0 === y1) { y0 -= 1; y1 += 1; } const yp = (y1 - y0) * 0.06; y0 -= yp; y1 += yp;
+  const X = (t) => pad.l + (t - x0) / (x1 - x0) * (W - pad.l - pad.r);
+  const Y = (v) => pad.t + (1 - (v - y0) / (y1 - y0)) * (H - pad.t - pad.b);
+  ctx.font = "11px " + getComputedStyle(document.body).getPropertyValue("--mono"); ctx.fillStyle = color("--muted"); ctx.strokeStyle = color("--rule"); ctx.lineWidth = 1;
+  // round gridlines: about six, a step of 1, 2 or 5 times a power of ten
+  const raw = (y1 - y0) / 6, p10 = 10 ** Math.floor(Math.log10(raw)), step = [1, 2, 5, 10].find(m => m * p10 >= raw) * p10;
+  for (let v = Math.ceil(y0 / step) * step; v <= y1; v += step) { const y = Math.round(Y(v)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    ctx.fillText(Number(v.toPrecision(12)).toLocaleString(), 6, y + 4); }
+  const span = x1 - x0, ticks = Math.max(2, Math.min(6, Math.floor((W - pad.l) / 130)));
+  for (let k = 0; k <= ticks; k++) { const t = x0 + span * k / ticks, iso = new Date(t).toISOString();
+    const label = span > 2 * 86400e3 ? iso.slice(5, 10) + " " + iso.slice(11, 16) : iso.slice(11, span < 120e3 ? 23 : 19);
+    ctx.fillText(label, Math.max(pad.l, Math.min(X(t) - 30, W - 90)), H - 8); }
+  series.forEach((s, n) => {
+    if (s.candles) {
+      const w = Math.max(1, Math.min(12, (W - pad.l - pad.r) / s.candles.length * 0.6));
+      for (const [t, o, h, l, c] of s.candles) { const up = c >= o; ctx.strokeStyle = ctx.fillStyle = color(up ? "--up" : "--down");
+        ctx.beginPath(); ctx.moveTo(X(t), Y(h)); ctx.lineTo(X(t), Y(l)); ctx.stroke();
+        ctx.fillRect(X(t) - w / 2, Y(Math.max(o, c)), w, Math.max(1, Math.abs(Y(o) - Y(c)))); }
+    } else {
+      ctx.strokeStyle = PALETTE[n % PALETTE.length]; ctx.lineWidth = 1.6; ctx.beginPath();
+      s.points.forEach(([t, v], j) => j ? ctx.lineTo(X(t), Y(v)) : ctx.moveTo(X(t), Y(v))); ctx.stroke();
+    }
+  });
+  $("legend").innerHTML = series.map((s, n) => s.candles ? `<span>candles of ${esc(s.name)}</span>` : `<span><i style="background:${PALETTE[n % PALETTE.length]}"></i>${esc(s.name)}</span>`).join("");
+  cv.onmousemove = (e) => {
+    const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, t = x0 + (mx - pad.l) / (W - pad.l - pad.r) * (x1 - x0);
+    let best = 0; times.forEach((x, j) => { if (Math.abs(x - t) < Math.abs(times[best] - t)) best = j; });
+    const row = a.rows[best], tip = $("tip");
+    tip.innerHTML = a.columns.map((c, i) => `<div><b>${esc(c)}</b> ${esc(row[i] ?? "null")}</div>`).join("");
+    tip.style.display = "block"; tip.style.left = Math.max(4, Math.min(mx + 14, W - tip.offsetWidth - 4)) + "px"; tip.style.top = "12px";
+  };
+  cv.onmouseleave = () => { $("tip").style.display = "none"; };
+}
+let resizing; addEventListener("resize", () => { clearTimeout(resizing); resizing = setTimeout(() => tab === "chart" && redraw(), 150); });
+
+// a link to a query: #q=<sql>[&tab=chart|stream][&table=<name>] runs it (or streams the table)
+const link = new URLSearchParams(location.hash.slice(1));
+setSql(link.get("q") ?? store.get("brrrrr.sql", "SHOW TABLES"));
+renderHistory();
+refreshTables().then(() => {
+  if (link.get("table")) return subscribe(link.get("table"));
+  if (link.get("q")) { if (link.get("tab")) tab = link.get("tab"), select(tab); return run(); }
+  redraw();
+});
+setInterval(refreshTables, 5000);
+</script>
+</body>
+</html>

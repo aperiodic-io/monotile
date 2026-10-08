@@ -1,0 +1,85 @@
+[package]
+name = "brrrrr"
+description = "SQL for tick data: query Parquet, CSV and JSON on disk and in object stores, serve live tables, run streaming pipelines."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1"
+arrow-array = { version = "60", optional = true }
+arrow-schema = { version = "60", optional = true }
+brrrrr-core = { path = "../brrrrr-core" }
+# `brrrrr sql`: queries over files and object stores, and its shell
+brrrrr-lake = { path = "../brrrrr-lake", optional = true }
+rustyline = { version = "18", optional = true, default-features = false, features = ["with-file-history"] }
+# `brrrrr serve`: the PostgreSQL wire protocol (psql, Grafana, drivers)
+pgwire = { version = "0.41", optional = true, default-features = false, features = ["server-api", "pg-type-chrono"] }
+chrono = { version = "0.4", optional = true, default-features = false, features = ["std"] }
+async-trait = { version = "0.1", optional = true }
+futures = { version = "0.3", optional = true }
+clap = { version = "4", features = ["derive", "env"] }
+object_store = { version = "0.12", features = ["aws"], optional = true }
+# `brrrrr historical`: Parquet files in, not in the default (live) binary
+parquet = { version = "60", default-features = false, features = ["arrow", "zstd", "snap", "lz4", "flate2-rust_backend", "simdutf8"], optional = true }
+rayon = { version = "1", optional = true }
+# ssl-vendored: OpenSSL built in (TLS and SASL/SCRAM), so the binary links no libssl; no curl
+iggy = { version = "=0.11.0", optional = true }
+rdkafka = { version = "0.39", features = ["zstd", "ssl-vendored"] }
+# `brrrrr run`'s JSONEachRow sources; exact float parsing, as for prices
+serde_json = { version = "1", features = ["float_roundtrip"] }
+signal-hook = "0.3"
+# the global allocator (main.rs); jemalloc's C code builds and links statically (make, a C compiler)
+tikv-jemallocator = "0.7"
+tokio = { version = "1", features = ["rt", "time", "sync"] }
+url = { version = "2", optional = true }
+
+[features]
+# The public build: queries over files and object stores. The live images are built without it
+# (Dockerfile: --no-default-features), as they were.
+default = ["sql"]
+sql = ["dep:brrrrr-lake", "dep:rustyline", "dep:pgwire", "dep:chrono", "dep:async-trait", "dep:futures", "dep:url", "dep:arrow-array", "dep:arrow-schema", "tokio/rt-multi-thread", "tokio/net", "tokio/macros"]
+# `brrrrr historical` (ADR-0016): the SQL over days of Parquet files
+historical = ["dep:parquet", "dep:arrow-array", "dep:arrow-schema", "dep:rayon"]
+iggy = ["dep:iggy", "tokio/macros"]
+# Checkpoints in an object store (s3://, memory:///) besides a directory on the pod's volume.
+# Off by default: the default binary (and image) has no HTTP client or cloud SDK code; the
+# `-extended` image is built with it (Dockerfile, FEATURES=object-store).
+object-store = ["dep:object_store", "dep:url", "tokio/rt-multi-thread"]
+
+[dev-dependencies]
+# the SQL acceptance tests sign their own S3 and Azure requests to set up buckets
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+tempfile = "3"
+# `brrrrr serve` as PostgreSQL clients see it (the extended protocol, typed values)
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+# an object store that ignores create-if-absent, to show `store::Remote` refuses it
+async-trait = "0.1"
+cucumber = "0.23"
+futures = "0.3"
+# the historical fixture's input, and the messages `brrrrr historical` writes (historical.rs)
+flate2 = "1"
+# the alignment's interleavings (align.rs)
+proptest = "1.11"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "process", "sync", "time"] }
+# a checkpoint body as a build before format 8 wrote it (run.rs, `as_version_5`)
+zstd = { version = "0.13", default-features = false }
+
+[[test]]
+name = "acceptance"
+path = "tests/acceptance/main.rs"
+harness = false
+
+# `brrrrr sql` as a user runs it, against object stores in Docker (tests/acceptance/sql)
+[[test]]
+name = "sql"
+path = "tests/sql/main.rs"
+harness = false
+required-features = ["sql"]

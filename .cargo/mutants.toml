@@ -1,0 +1,234 @@
+# A mutant that hangs the suite (e.g. an ordering flipped so the book never dedups) is detected:
+# keep such runs short. CI treats "only timeouts" (exit 3) as caught.
+timeout_multiplier = 3.0
+minimum_test_timeout = 30
+test_tool = "nextest"
+# Cargo.toml's `mutants` profile: dev without debug info.
+profile = "mutants"
+# A mutant that leaves a variable unused must still build under CI's RUSTFLAGS=-D warnings, or
+# it is filed as unviable instead of tested.
+cap_lints = true
+# Equivalent mutant: at exactly 2^53 (2^24 for Float32) the integer path and the shortest-digits
+# path print the same text, so `<` vs `<=` on the limit cannot be observed.
+exclude_re = [
+  "format.rs:.*replace < with <= in float",
+  # Equivalent mutant: a packed field's element count only sizes its vector's first allocation
+  # (the vector grows as needed and becomes an exact-length array), so it cannot be observed.
+  "proto.rs:.*replace / with (\\*|%) in Codec::decode",
+  # Equivalent mutants: `|` and `^` agree on bits that cannot both be set. A protobuf tag's
+  # field number shifted left by 3 has its low 3 bits clear, where the wire type (0 to 5) goes;
+  # key_hash's seed 0 half shifted left by 64 has its low 64 bits clear, where the seed 1 half
+  # (a u64) goes. (`<<` to `>>` in key_hash is caught: its outputs are pinned.)
+  "proto.rs:.*replace \\| with \\^ in Codec::encode",
+  "run\\.rs:.*replace \\| with \\^ in key_hash",
+  # Equivalent mutants at the edges of x86's float to integer conversion, where the out of range
+  # answer equals the in range one: exactly 2^63 into uint64 (both give 2^63), and `lo - 1.0`
+  # against `lo / 1.0` in cvttsd2si (between them only lo itself, whose answer is lo either way).
+  "value.rs:.*replace < with <= in f64_to_u64",
+  "value.rs:.*replace - with / in cvttsd2si",
+  # The runtime's Kafka and HTTP I/O are exercised by the acceptance scenarios, which need
+  # Redpanda: too slow to run per mutant. Only the functions that talk to a broker, a socket or
+  # the clock are exempt, `run` among them. What the checkpoint and lease logic decides is lifted
+  # out of `run` and mutated: the lease's timing (`Timing`, `Lease`), the claim, each
+  # checkpoint's thread and its outcome (`claim`, `finish`, `step`: unit-tested on a directory),
+  # the sinks' acks by generation (`Ledger`), the lag, source partition growth, the sources'
+  # retention, acked sink offsets and suppression; so are the
+  # pure parts (settings, offsets, hashing, throttling, sink topics, metrics rendering and the
+  # health check, `validate`) and everything else on the checkpoint store (restore, standing
+  # by, collection). Still in `run`, and so only covered by the acceptance scenarios: its
+  # batching, aligned polling, the idle close's timing, when the replay has caught up, and when
+  # a checkpoint is cut and its thread's outcome applied (checkpoint.feature).
+  "crates/brrrrr/src/(run|metrics|main)\\.rs:.*( in | replace )(run|written_since|serve|produce|replay_horizon|first_records|create_topics|main|now_ms|partitions|delivery_failure)( |$)",
+  "crates/brrrrr/src/run\\.rs:.*<impl (ProducerContext|ClientContext) for Deliveries>",
+  # Iggy TCP I/O, partition queue health and shutdown run against a broker in the iggy job.
+  # Pure topic mapping, checkpoint offsets, EOF decisions and transport classification are mutated.
+  "crates/brrrrr/src/iggy\\.rs:.*(Reader::(start|poll|end|count|quiet_at|failures)|<impl Drop for Reader>::drop|sdk::(metadata|consume))( |$)",
+  # The historical runtime's scheduling sets its speed and memory, never its output (the tests run
+  # every pipeline on two pools, with and without decode threads, decoded inline and on threads):
+  # the order symbols start in (largest first) and the decode threads each gets (`run`), how many
+  # parts the pool cuts a batch in, the buffer before a part file, which sources decode on the
+  # reader's thread (INLINE_ROWS), how far decoding runs ahead, and a decoding thread going on
+  # after it sent its error (the reader stops at the error).
+  "crates/brrrrr/src/historical\\.rs:.*replace (\\+= with \\*=|/ with (%|\\*)) in run$",
+  "crates/brrrrr/src/historical\\.rs:.*<impl Pool for Rayon<'_>>::threads",
+  "crates/brrrrr/src/historical\\.rs:.*replace << with >>( in Lines::new)?$",
+  "crates/brrrrr/src/historical\\.rs:.*replace (<= with >|> with (==|<|>=)|\\+ with (-|\\*)|\\|\\| with &&) in Parquet::open$",
+  # Unreachable with a valid reader: every column of a row group comes in batches of the same rows,
+  # so none ends before the others (a reader's bug would be refused, not merged).
+  "crates/brrrrr/src/historical\\.rs:.*replace (> with <|\\|\\| with &&) in <impl Source for Parquet>::next$",
+  # Equivalent mutants of the Parquet output's encoding choice: a kind with one candidate tried as
+  # one of several is that candidate, a Boolean column's none as no dictionary (Parquet's writer
+  # never makes one of booleans); a tie between two (`<=`) is a smallest either way. And of
+  # text read as Float64 (`decode`): its dictionary is a hint, the text parsed the same without.
+  "crates/brrrrr/src/historical\\.rs:.*delete match arm \\[(only)?\\] in write_parquet$",
+  "crates/brrrrr/src/historical\\.rs:.*replace < with <= in smallest$",
+  "crates/brrrrr/src/historical\\.rs:\\d+:29: replace == with != in decode$",
+  # Equivalent mutants: a column's typed shortcuts whose fallback builds the same column. Without
+  # gather's typed arms, `from_values` types the gathered values as they were; without
+  # `constant`'s, its values are compared one by one; a concatenation of nothing is no values
+  # either way.
+  "column\\.rs:.*replace match guard .* with false in Col::gather$",
+  "column\\.rs:.*replace \\|\\| with && in Col::gather$",
+  "column\\.rs:.*delete match arm .* in Col::constant$",
+  "column\\.rs:.*delete match arm None in Col::concat$",
+  # Equivalent mutants of the aggregate kernels: a row's truth read from a Bool column in place
+  # or through `truth` of its value is the same truth, and `QuantileOf` (a level of another
+  # call's digest) takes no values in its loop or in `Acc::add`.
+  "kernel\\.rs:.*delete match arm .* in truth_at$",
+  "kernel\\.rs:.*delete match arm \\(Acc::QuantileOf\\{\\.\\.\\}, _\\) in typed$",
+  # More equivalent shortcuts of the kernels, each beside a path to the same state: the latest
+  # and earliest of rows without NULLs read at their ends rather than looked for; a Float64 sum
+  # added to in place rather than through `sum`; trades judged not in order (`ordered`) added one
+  # by one, which the property tests hold to the ordered fold; a constant side column read
+  # through `strs` (a constant has no NULL mask to ignore).
+  "kernel\\.rs:.*delete match arm \\(Rows::(Range|Pick)\\(.*\\), true\\) in typed$",
+  "kernel\\.rs:.*delete match arm Value::F64\\(t\\) in sum_choose$",
+  "kernel\\.rs:.*(replace ordered -> bool with false|replace \\|\\| with && in ordered)$",
+  "kernel\\.rs:.*replace match guard c\\.nulls\\.is_none\\(\\) with (true|false) in Sides<'a>::of$",
+  # And a Bool condition's rows counted or picked in a loop of their own (`count_true`, `if`'s
+  # picks) or through `truth_at` one by one: the same rows.
+  "kernel\\.rs:.*delete match arm \\(Data::Bool\\(v\\), (None|Some\\(n\\)), (true|Rows::Range\\(a, b\\))\\) in (typed|count_true)$",
+  # Equivalent mutants of the expression loops: a string compared for equality by its order has
+  # the same truth; `to_int64_or_zero` of a NULL is 0 by the text loop as by the row one.
+  "vector\\.rs:.*replace match guard matches!\\(op, B::Eq \\| B::NotEq\\) with false in cmp_col$",
+  "vector\\.rs:\\d+:47: replace match guard a\\.nulls\\.is_none\\(\\) with true in fn1_col$",
+  # And of the expression compiler: a call that is not plain is an aggregate's or a window's,
+  # which no arm takes (`function` gives no node and the row compiler compiles it, the same
+  # values); booleans read two-valued (`plain_bools`) or through `truths` are the same truths; a
+  # literal negated that is not a number, and a name of three parts, are refused by both
+  # compilers.
+  "vector\\.rs:.*replace (&& with \\|\\||\\|\\| with &&) in VCompiler<'a>::function$",
+  "vector\\.rs:.*(replace plain_bools -> Option<&\\[bool\\]> with None|delete match arm \\(Data::Bool\\(v\\), None\\) in plain_bools)$",
+  "vector\\.rs:.*replace match guard (matches!\\(v\\.value, ast::Value::Number\\(\\.\\.\\)\\)|ids\\.len\\(\\) == 2) with true in VCompiler<'a>::node$",
+  # How many parts a pool cuts a batch in sets its speed, not its output (every pipeline is run
+  # on one thread and on several, in chunks of 5 to 65,536 rows).
+  "batch\\.rs:.*(replace Pool::part_rows -> usize with|<impl Pool for Serial>::threads|replace / with (%|\\*) in parts$)",
+  # The rows of a chunk (CHUNK_ROWS) set its memory, not its output (the tests run chunks of 5 to
+  # 65,536 rows); an empty flow delivered writes nothing.
+  "batch\\.rs:.*replace << with >>$",
+  "batch\\.rs:.*replace Flow::is_empty -> bool with false$",
+  # Whether a level of one job runs it inline or on the pool sets speed, not output: every
+  # pipeline runs on one thread and on several.
+  "batch\\.rs:\\d+:31: replace == with != in Historical::chunk$",
+  # Equivalent: `has_nan`'s loops of a float column and its kinds of no NaN are shortcuts of
+  # the value-by-value scan below them, which finds the same NaN.
+  "batch\\.rs:.*delete match arm Data::(F64\\(v\\)|F32\\(v\\)|Int\\(_\\) .*) in has_nan$",
+  # Equivalent: every aggregate of a block with a NaN added row by row to each window
+  # (`min_or_max` true), not a min or max alone, is slower, not other.
+  "batch\\.rs:.*replace min_or_max -> bool with true$",
+  # Equivalent: every block of trades added row by row to each wider window (the guard for trades
+  # of one time on both sides of a block always true) is slower, not other.
+  "batch\\.rs:.*replace match guard w\\.trades\\(\\)\\.map\\(.*\\) == Some\\(first\\) with true in BWindow::apply_many$",
+  # Equivalent: the batches a view passes on are filtered of empty ones (`b.len > 0`), which
+  # carry no rows either way.
+  "batch\\.rs:.*replace > with >= in apply$",
+  # Equivalent mutants of the historical executor's shortcuts, each beside a path to the same
+  # output: a view's batches laid out row by row rather than as columns (`deliver`, which also
+  # fills the columns no reader reads, `lay_out_batch`); a column cast value by value rather than
+  # kept where it conforms (`cast`: `cast_into` keeps a conforming value); a batch's keys sorted
+  # (stably) rather than found in order (`in_order`), compared through `order_by` rather than
+  # typed (`order_rows`); an empty flow run through an operator; a group of rows taken one by one
+  # rather than as a run (`BWindow::group`'s runs never true, `BLag`'s runs of one row); a join's
+  # one key on each side looked up as several (`BRight::join`); `arg_max(x, (a, b))`'s key read
+  # as one column of tuples, which `order_by` compares item by item (`columnar`); and `run_rows`
+  # running no operators over its rows, or its operators over none.
+  "batch\\.rs:.*replace match guard computed\\.is_empty\\(\\) with false in Historical::deliver$",
+  "batch\\.rs:.*replace match guard !needed with false in lay_out_batch$",
+  "batch\\.rs:.*(replace \\|\\| with && in|delete match arm .* in) cast$",
+  "batch\\.rs:.*(replace in_order -> bool with false|replace \\|\\| with && in in_order)$",
+  "batch\\.rs:.*delete match arm .* in order_rows$",
+  "batch\\.rs:.*replace match guard flow\\.is_empty\\(\\) with false in apply$",
+  "batch\\.rs:\\d+:68: replace == with != in BWindow::group$",
+  "batch\\.rs:.*replace (match guard run\\.2 == key with false|- with \\+) in BLag::apply$",
+  "batch\\.rs:.*delete match arm \\(Some\\(lk\\), Some\\(rk\\), Times::All\\(rt\\)\\) in BRight::join$",
+  "batch\\.rs:.*delete match arm \\(None, \\[x, Expr::Tuple\\(key\\)\\]\\) in columnar$",
+  "batch\\.rs:.*replace \\|\\| with && in run_rows$",
+  # Equivalent: empty batches pass on or not (a view's, a window's, a join side's, a source's
+  # slice), and a `lag` run of exactly `offset` rows is its head and no rows of its own.
+  "batch\\.rs:.*replace > with >= in (Historical::deliver|windows|BJoin::apply|Feed<'a>::take_until)$",
+  "batch\\.rs:\\d+:20: replace > with >= in lagged$",
+  # How fused windows and a window's groups are cut into jobs, and whether one job runs inline or
+  # on the pool, sets speed, not output (every pipeline runs on one thread and on several), as
+  # does how far a source is read ahead (`Feed::wants` reading all of it).
+  "batch\\.rs:.*replace (== with !=|> with (==|<|>=)) in BWindow::apply_many$",
+  "batch\\.rs:\\d+:72: delete ! in BWindow::apply_many$",
+  "batch\\.rs:\\d+:97: replace - with \\+ in BWindow::apply_many$",
+  "batch\\.rs:\\d+:(71|91): replace - with \\+ in add_split$",
+  "batch\\.rs:\\d+:(10|31): replace == with != in add_split$",
+  "batch\\.rs:.*replace (\\|\\| with &&|\\+= with \\*=|>= with <|/ with (%|\\*)) in add_split$",
+  "batch\\.rs:.*replace Feed<'a>::wants -> bool with true$",
+  # Unreachable: a table a query without WITH reads is a stream, the engine plans a window over
+  # tumble() alone and refuses a second `>=` in an ASOF condition and a join with more than a
+  # SELECT after it; without window functions the columnar compiler refuses only what the
+  # engine's does (its errors are the row compiler's); a projection's input is never rows (it is
+  # a view's first operator, or `lag`'s next), so its width is not read; and the aggregate calls'
+  # slots are compiled into items that are dropped (only the calls, in order, are read).
+  "batch\\.rs:.*replace match guard .* with true in (columnar|join_view)$",
+  "batch\\.rs:\\d+:23: replace \\|\\| with && in join_view$",
+  "batch\\.rs:.*replace \\+ with (-|\\*) in projection$",
+  "batch\\.rs:.*replace (\\+ with \\*|- with (\\+|/)) in aggregate_calls::<impl Aggregates for Calls>::aggregate$",
+  # Equivalent: how far a source is read ahead of its chunk (`Feed::wants` reading one batch
+  # more, or all of them) sets memory, not output; a batch with no row in the range is
+  # queued as an empty slice or not at all. And the column ops of `if(x IS NULL, NULL, y)` on a
+  # `y` of two kinds (`Choose`) or of values: its NULLs read the same through `Col::get`.
+  "batch\\.rs:.*replace (< with <=|&& with \\|\\|) in Feed<'a>::wants$",
+  "batch\\.rs:.*replace > with >= in Feed<'a>::fill$",
+  "vector\\.rs:.*delete ! in Program::col$",
+  # Unobservable without pulling the power: a directory's fsync (the file is there either way),
+  # and a crashed write's temporary file being removed at exactly its age limit or just after.
+  "store\\.rs:.*replace sync_dir -> std::io::Result<\\(\\)> with Ok\\(\\(\\)\\)",
+  "store\\.rs:.*replace > with >= in <impl Store for Dir>::tidy",
+  # Equivalent mutants of the checkpoint's streaming: a value of exactly one chunk goes to the
+  # compressor on its own either way (buffered, it fills the chunk and is flushed alone), and
+  # the window's fast path only skips `fill`, which with the bytes already there moves them to
+  # the front and reads nothing (`at` is never 0 there: every value starts with a `pop`).
+  "checkpoint\\.rs:.*replace > with >= in <impl postcard::ser_flavors::Flavor for Zstd<W>>::try_extend",
+  # How much is handed to the compressor at a time (CHUNK, 64 KiB) sets how often it is called,
+  # not what it writes: 64 + 1024 bytes compress to the same frame.
+  "checkpoint\\.rs:.*replace \\* with \\+$",
+  "checkpoint\\.rs:.*replace (- with /|< with <=) in <impl postcard::de_flavors::Flavor<'de> for Stream<R>>::try_take_n_temp",
+  # Equivalent mutants: which of `in_order`'s two merges runs (`few`: a few values placed by
+  # binary search among many centroids, or the two runs merged) sets its speed, never the order
+  # it writes, the appended stable sort's either way (tested on both sides of the bound).
+  "agg\\.rs:.*( in few$|replace few -> bool with)",
+  # Equivalent mutant: a drained sequence buffer of exactly 64 slots is shrunk to 64, which
+  # leaves it as it is.
+  "agg\\.rs:.*replace > with >= in Sequence<I, S>::add",
+  # Equivalent mutant: distinct_stats reads its tick changes (x - prev) / prev only through their
+  # standard deviation, which (x + prev) / prev, the same changes shifted by 2, leaves as it is.
+  "agg\\.rs:.*replace - with \\+ in <impl Fold for Distinct>::fold",
+  # Equivalent mutant: an exact sum's sticky bit (any bit set below the 64 rounded) also set by
+  # the lowest of those 64 bits changes nothing, since it is where the sticky bit goes.
+  "over\\.rs:.*replace < with <= in round$",
+  # Equivalent mutant: without its arm, a sliding count is recomputed over the frame's rows,
+  # which counts the same (the arm only saves revisiting them).
+  "over\\.rs:.*delete match arm \\(Slide::Count\\{n, \\.\\.\\}, _\\) in Slide::result",
+  # Equivalent mutants: a sliding min or max whose candidates are never read (every value taken
+  # for one that compares with nothing, or the candidates' guard never true) is recomputed over
+  # the frame's rows, which finds the same (the candidates only save revisiting them).
+  "over\\.rs:.*replace match guard compare\\(v, v\\)\\.is_none\\(\\) with true in Slide::push",
+  "over\\.rs:.*replace match guard rows\\.front\\(\\)\\.is_some_and\\(.*\\) with false in Slide::result",
+  # Equivalent mutants: the shortcuts on a sink write's way only skip work. An owned row already
+  # in the sink's columns (`plan.identity`) laid out again, a value of a row whose values each
+  # feed one column (`plan.unique`) cloned instead of moved, and a value that conforms to its
+  # column (`conforms`) cast all the same, which leaves it as it is, write the same message.
+  "engine\\.rs:.*replace match guard plan\\.identity with false in Engine::write_sink",
+  "engine\\.rs:.*replace match guard plan\\.unique with false in lay_out",
+  "engine\\.rs:.*replace match guard r\\[i\\]\\.conforms\\(t\\) with false in lay_out",
+  # Equivalent mutants: `concat(to_string(x), ..)` read without its `to_string` unwrapped
+  # (`call1` finding none) builds the same text through a string value; a year in 0-9999
+  # formatted by `format!` instead is padded the same; and when the thread's scratch string is
+  # dropped for a fresh one sets what it keeps, not what is written in it.
+  "expr\\.rs:.*replace call1 -> Option<&'e Expr> with None",
+  "expr\\.rs:.*delete match arm \\[x\\] in call1",
+  "expr\\.rs:.*replace match guard \\(0\\.\\.=9999\\)\\.contains\\(&y\\) with false in format_datetime",
+  "format\\.rs:.*in scratch$",
+]
+# the acceptance scenarios need a broker (CI runs them in their own job)
+additional_cargo_test_args = ["-E", "not binary(acceptance)"]
+# crate::pow is a verbatim port of musl's pow. Its mutants only perturb extra-precision terms
+# (the zhi/zlo and yhi/ylo splits, tails), which change a result in fewer than 1 of 40,000
+# inputs; a fixture large enough to catch them would be megabytes of random bits. skew_samp and
+# kurt_samp, its callers, are still exercised (line coverage of pow.rs: 100%).
+# examples/ are measuring tools (examples/replay.rs replays captured traffic), not checked code.
+exclude_globs = ["crates/brrrrr-core/src/pow.rs", "crates/brrrrr-core/examples/*"]

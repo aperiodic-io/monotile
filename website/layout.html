@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{{title}}</title>
+<meta name="description" content="{{description}}">
+<meta property="og:title" content="{{title}}">
+<meta property="og:description" content="{{description}}">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b1b26'/%3E%3Cpath d='M9 6v20M16 9v14M23 4v18' stroke='%235cd3f0' stroke-width='3' stroke-linecap='round'/%3E%3Crect x='6.5' y='11' width='5' height='9' rx='1' fill='%235cd3f0'/%3E%3Crect x='13.5' y='13' width='5' height='6' rx='1' fill='%23e5484d'/%3E%3Crect x='20.5' y='8' width='5' height='10' rx='1' fill='%235cd3f0'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:ital,wght@0,400..700;1,400&family=Martian+Mono:wdth,wght@75..112.5,300..800&display=swap">
+<link rel="stylesheet" href="{{root}}assets/site.css">
+</head>
+<body class="s-{{section}}">
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <div class="top-in">
+    <a class="brand" href="{{root}}index.html" aria-label="brrrrr home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M9 6v20M16 9v14M23 4v18" class="wick"/><rect x="6.5" y="11" width="5" height="9" rx="1" class="up"/><rect x="13.5" y="13" width="5" height="6" rx="1" class="down"/><rect x="20.5" y="8" width="5" height="10" rx="1" class="up"/></svg>
+      <span>brrrrr</span>
+    </a>
+    <div class="search" data-root="{{root}}" hidden>
+      <input type="search" id="search" placeholder="Search" aria-label="Search the site (press /)" autocomplete="off" spellcheck="false" aria-controls="search-results" aria-expanded="false">
+      <kbd aria-hidden="true">/</kbd>
+      <div class="results" id="search-results" role="listbox" hidden></div>
+    </div>
+    <button class="menu" type="button" aria-expanded="false" aria-controls="nav">Menu</button>
+    <nav id="nav" class="nav" aria-label="Site">
+      <a href="{{root}}docs/index.html" data-s="docs">Docs</a>
+      <a href="{{root}}docs/cookbook.html" data-p="cookbook">Cookbook</a>
+      <a href="{{root}}use-cases.html" data-s="use-cases">Use cases</a>
+      <a href="{{root}}benchmarks.html" data-s="benchmarks">Benchmarks</a>
+      <a href="{{root}}compare.html" data-s="compare">Compare</a>
+      <a class="gh" href="https://github.com/aperiodic-io/monotile">GitHub</a>
+    </nav>
+  </div>
+</header>
+<div class="frame">
+  <aside class="side" aria-label="Documentation">
+    <p class="side-h">Start</p>
+    <a href="{{root}}docs/index.html">Getting started</a>
+    <a href="{{root}}docs/cookbook.html">Cookbook</a>
+    <p class="side-h">Reference</p>
+    <a href="{{root}}docs/sql.html">SQL</a>
+    <a href="{{root}}docs/files.html">Files and object stores</a>
+    <a href="{{root}}docs/cli.html">Command line</a>
+    <a href="{{root}}docs/python.html">Python</a>
+    <a href="{{root}}docs/server.html">Server</a>
+    <a href="{{root}}docs/streaming.html">Streaming pipelines</a>
+    <p class="side-h">More</p>
+    <a href="{{root}}docs/faq.html">FAQ</a>
+    <a href="{{root}}docs/from-kdb.html">Coming from kdb+</a>
+  </aside>
+  <main id="main">
+{{body}}
+  </main>
+</div>
+<footer class="foot">
+  <div class="foot-in">
+    <p><strong>brrrrr</strong> · SQL for time series, live and historical · <a href="https://github.com/aperiodic-io/monotile/blob/main/LICENSE">Apache-2.0</a></p>
+    <p><a href="{{root}}blog/introducing-brrrrr.html">Introducing brrrrr</a> · <a href="https://github.com/aperiodic-io/monotile/blob/main/docs/ROADMAP.md">Roadmap</a> · <a href="https://github.com/aperiodic-io/monotile">Source</a> · <a href="https://github.com/aperiodic-io/monotile/issues">Issues</a> · <a href="https://github.com/aperiodic-io/monotile/discussions">Discussions</a> · <a href="https://github.com/aperiodic-io/monotile/blob/main/CONTRIBUTING.md">Contributing</a> · made by <a href="https://github.com/aperiodic-io">aperiodic</a></p>
+  </div>
+</footer>
+<script src="{{root}}assets/site.js"></script>
+</body>
+</html>

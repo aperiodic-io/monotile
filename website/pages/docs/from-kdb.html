@@ -1,0 +1,50 @@
+<!-- title: Coming from kdb+ · brrrrr | description: q idioms and their brrrrr SQL: xbar bars, aj as-of joins, wavg, mavg, ema, deltas, by-clauses, date-partitioned HDBs, and the tickerplant, RDB and HDB architecture. -->
+<p class="eyebrow">Guide</p>
+<h1>Coming from kdb+</h1>
+<p class="lede">brrrrr's SQL covers the q you write every day for tick data. This page maps the idioms, then the architecture.</p>
+
+<h2 id="idioms">Idioms</h2>
+<div class="tbl"><table>
+<thead><tr><th>q</th><th>brrrrr SQL</th></tr></thead>
+<tbody>
+<tr><td><code>select last price by sym from trade</code></td><td><code>SELECT symbol, last(price, ts) FROM trade GROUP BY symbol</code></td></tr>
+<tr><td><code>select o:first price, h:max price, l:min price, c:last price, v:sum size by 1 xbar time.minute, sym from trade</code></td><td><code>SELECT time_bucket('1m', ts) AS minute, symbol, first(price, ts) AS o, max(price) AS h, min(price) AS l, last(price, ts) AS c, sum(size) AS v FROM trade GROUP BY minute, symbol</code></td></tr>
+<tr><td><code>select size wavg price by sym from trade</code></td><td><code>SELECT symbol, vwap(price, size) FROM trade GROUP BY symbol</code></td></tr>
+<tr><td><code>aj[`sym`time; trade; quote]</code></td><td><code>SELECT * FROM trade t ASOF LEFT JOIN quote q ON t.sym = q.sym AND t.time &gt;= q.time</code></td></tr>
+<tr><td>markouts: <code>aj</code> at <code>time+5000</code></td><td><code>ASOF JOIN quote q ON t.sym = q.sym AND t.time + INTERVAL '5 seconds' &gt;= q.time</code>, one join per horizon (<a href="cookbook.html#markouts">recipe</a>)</td></tr>
+<tr><td>fills: <code>fills</code> on bars over a time grid</td><td><code>GROUP BY time_bucket_gapfill('1m', time), sym</code> with <code>locf(last(price, time))</code> (<a href="cookbook.html#gapfill_bars">recipe</a>)</td></tr>
+<tr><td><code>ej</code> / <code>lj</code> with a keyed table</td><td><code>JOIN</code> / <code>LEFT JOIN</code> on its keys</td></tr>
+<tr><td><code>update ret:-1+price%prev price by sym from trade</code></td><td><code>price / lag(price) OVER (PARTITION BY sym ORDER BY time) - 1</code></td></tr>
+<tr><td><code>deltas price</code></td><td><code>price - lag(price) OVER (…)</code></td></tr>
+<tr><td><code>sums size</code></td><td><code>sum(size) OVER (PARTITION BY sym ORDER BY time)</code></td></tr>
+<tr><td><code>mavg[20; price]</code>, <code>mdev[20; price]</code>, <code>mmax</code>…</td><td><code>avg(price) OVER (… ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)</code>, <code>stddev</code>, <code>max</code>…</td></tr>
+<tr><td><code>ema[0.1; price]</code></td><td><code>ema(price, 0.1) OVER (PARTITION BY sym ORDER BY time)</code></td></tr>
+<tr><td><code>maxs price</code></td><td><code>max(price) OVER (PARTITION BY sym ORDER BY time)</code></td></tr>
+<tr><td><code>med price</code>, <code>pctl</code></td><td><code>median(price)</code>, <code>quantile_cont(price, 0.9)</code></td></tr>
+<tr><td><code>select from trade where date=2024.01.02, sym=`BTC</code></td><td><code>SELECT * FROM trade WHERE date = '2024-01-02' AND sym = 'BTC'</code> over a Hive-partitioned directory</td></tr>
+<tr><td><code>select count i by sym from trade</code></td><td><code>SELECT sym, count(*) FROM trade GROUP BY sym</code></td></tr>
+<tr><td><code>select from trade where size &gt; 2 * (avg; size) fby sym</code></td><td>a subquery of each symbol's average, joined: <code>JOIN (SELECT sym, avg(size) AS a FROM trade GROUP BY sym) s ON t.sym = s.sym WHERE t.size &gt; 2 * s.a</code></td></tr>
+<tr><td><code>wj</code> (window join)</td><td>not yet: a rolling <code>RANGE</code> window on one table covers many uses</td></tr>
+</tbody></table></div>
+
+<h2 id="architecture">Architecture</h2>
+<div class="tbl"><table>
+<thead><tr><th>kdb+</th><th>brrrrr</th></tr></thead>
+<tbody>
+<tr><td>Feed handler</td><td>Your producer writing to Kafka, or <code>POST /write/&lt;table&gt;</code></td></tr>
+<tr><td>Tickerplant and its log</td><td>Kafka or Redpanda; <code>brrrrr serve</code>'s write-ahead log</td></tr>
+<tr><td>RDB</td><td><code>brrrrr serve</code>'s live tables: today in memory</td></tr>
+<tr><td>HDB: date-partitioned, splayed, <code>p#sym</code></td><td>Hive-partitioned Parquet (<code>date=…/</code>), sorted by time within a symbol, on disk or in S3</td></tr>
+<tr><td>End-of-day write-down</td><td>The server flushes to daily Parquet every minute; no end-of-day job</td></tr>
+<tr><td>Gateway joining RDB and HDB</td><td>One query over a live table reads both</td></tr>
+<tr><td>Real-time subscribers (<code>.u.sub</code>), CEP engines</td><td><code>/subscribe/&lt;table&gt;</code>, live views, and <code>brrrrr run</code> pipelines</td></tr>
+<tr><td>q IPC clients</td><td>The PostgreSQL protocol, HTTP, and Python</td></tr>
+</tbody></table></div>
+
+<h2 id="differences">Differences to know</h2>
+<ul>
+<li><strong>Time is microseconds, in UTC.</strong> Nanosecond timestamps are read to the microsecond. Buckets and display take a time zone.</li>
+<li><strong>Rows are in time order per table.</strong> brrrrr streams through a table by its time; a table out of order is sorted once.</li>
+<li><strong>Symbols are text.</strong> There is no enumeration to manage; Parquet's dictionary encoding does the same job on disk.</li>
+<li><strong>No q.</strong> SQL from the shell, Python and the PostgreSQL protocol.</li>
+</ul>

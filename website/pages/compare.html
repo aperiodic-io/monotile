@@ -1,0 +1,55 @@
+<!-- title: Compare · brrrrr | description: brrrrr next to kdb+ (KDB-X), DuckDB, QuestDB, ClickHouse, Polars and TimescaleDB: what each does well, and when each is the better choice. -->
+<p class="eyebrow">Compare</p>
+<h1>brrrrr and the tools you know</h1>
+<p class="lede">brrrrr is a time-series engine for data you keep in open files. Here is how it sits next to the tools people use for the same work, and when each of them is the better choice.</p>
+
+<div class="tbl"><table>
+<thead><tr><th></th><th>brrrrr</th><th>kdb+ / KDB-X</th><th>DuckDB</th><th>QuestDB</th><th>ClickHouse</th></tr></thead>
+<tbody>
+<tr><td>Query Parquet, CSV, JSON in place</td><td class="yes">yes</td><td>Parquet module</td><td class="yes">yes</td><td><code>read_parquet()</code>, cold tier</td><td class="yes">yes (table functions)</td></tr>
+<tr><td>Object stores (S3, GCS, Azure)</td><td class="yes">yes</td><td>yes (KDB-X)</td><td class="yes">yes</td><td>enterprise tiering</td><td class="yes">yes</td></tr>
+<tr><td>As-of join</td><td class="yes">yes, exact</td><td class="yes"><code>aj</code></td><td class="yes">yes</td><td class="yes">yes</td><td class="yes">yes</td></tr>
+<tr><td>Bars, VWAP, TWAP, first/last</td><td class="yes">built in</td><td class="yes">in q</td><td>by hand (arg_min, sums)</td><td class="yes"><code>SAMPLE BY</code></td><td>by hand</td></tr>
+<tr><td>Same query live and over history</td><td class="yes">yes, one engine</td><td>in q, across processes</td><td class="no">batch only</td><td>separate paths</td><td>materialized views (insert-time)</td></tr>
+<tr><td>Server, PostgreSQL protocol</td><td class="yes">yes</td><td>q IPC, PG in KDB-X</td><td class="no">embedded</td><td class="yes">yes</td><td>own protocol, PG partial</td></tr>
+<tr><td>Subscriptions to live results</td><td class="yes">yes</td><td class="yes">yes</td><td class="no">no</td><td>live views</td><td>no</td></tr>
+<tr><td>Exactly-once Kafka pipelines</td><td class="yes">yes</td><td>by hand</td><td class="no">no</td><td class="no">no</td><td>Kafka engine, at-least-once</td></tr>
+<tr><td>Python</td><td class="yes">pip, Arrow</td><td>PyKX</td><td class="yes">pip, Arrow</td><td>clients</td><td>clients, chDB</td></tr>
+<tr><td>Licence</td><td>Apache-2.0</td><td>proprietary; free tier capped at 16 GB, 4 threads</td><td>MIT</td><td>Apache-2.0, enterprise add-ons</td><td>Apache-2.0</td></tr>
+</tbody></table></div>
+
+<h2 id="kdb">kdb+ and KDB-X</h2>
+<p>kdb+ is the standard for tick data, with decades of production use, q's expressiveness, and the fastest in-memory columns there are. KDB-X adds SQL, Python, Parquet and a free community tier capped at 16 GB of memory and 4 threads.</p>
+<p><strong>Choose kdb+</strong> when your team already writes q, you need its ecosystem (feed handlers, kdb Insights, consultants), or your firm has a licence.</p>
+<p><strong>Choose brrrrr</strong> when you want SQL your whole team reads, data in open Parquet any tool can open, no memory or thread caps, and a pipeline whose live output and backfill are the same by construction. <a href="docs/from-kdb.html">Coming from kdb+</a> maps q idioms to brrrrr SQL.</p>
+
+<h2 id="duckdb">DuckDB</h2>
+<p>DuckDB is the best general-purpose engine for analytics on one machine: broad SQL, a huge ecosystem, and very fast scans and aggregations.</p>
+<p><strong>Choose DuckDB</strong> for general analytics, wide SQL (window functions of every kind, full outer joins, recursive queries), and when your queries are mostly scans and group-bys.</p>
+<p><strong>Choose brrrrr</strong> for queries shaped by time (bars, as-of joins per symbol, rolling windows), where it is faster in less memory, and when the same query must also run live. They work well together: brrrrr reads and writes the Parquet DuckDB does, and both hand results to Polars and pandas as Arrow.</p>
+
+<h2 id="questdb">QuestDB</h2>
+<p>QuestDB is a fast open-source time-series database with SQL extensions for markets (<code>SAMPLE BY</code>, <code>ASOF JOIN</code>, <code>LATEST ON</code>), high ingest rates and a PostgreSQL protocol.</p>
+<p><strong>Choose QuestDB</strong> for a database that owns its storage, with heavy ingest from many writers, and its web console and integrations.</p>
+<p><strong>Choose brrrrr</strong> when the data is already in Parquet or object stores and should stay there, when you need exactly-once outputs to Kafka, or an embedded engine in Python with no server.</p>
+
+<h2 id="clickhouse">ClickHouse</h2>
+<p>ClickHouse is a distributed analytics database: petabytes, many users, rich SQL, and materialized views on insert.</p>
+<p><strong>Choose ClickHouse</strong> for a shared analytics warehouse at scale.</p>
+<p><strong>Choose brrrrr</strong> for one binary with no cluster, event-time windows that close on time (not on insert), and exact as-of semantics live.</p>
+
+<h2 id="polars">Polars and pandas</h2>
+<p>Polars is a fast DataFrame library with <code>join_asof</code> and <code>group_by_dynamic</code>; pandas is everywhere.</p>
+<p><strong>Use them with brrrrr:</strong> query files and object stores with brrrrr's SQL, get a DataFrame back, and pass DataFrames in as tables. SQL is the part to share with colleagues and to run live later.</p>
+
+<h2 id="timescale">TimescaleDB and InfluxDB</h2>
+<p>TimescaleDB extends PostgreSQL with hypertables, compression and continuous aggregates; InfluxDB 3 is a metrics database on Arrow and Parquet.</p>
+<p><strong>Choose them</strong> when you want PostgreSQL's full ecosystem (Timescale) or a metrics platform with its agents and dashboards (InfluxDB).</p>
+<p><strong>Choose brrrrr</strong> for market data's vocabulary (as-of joins, VWAP, first/last by time), and files you own rather than a database's storage.</p>
+
+<h2 id="not-for">What brrrrr is not for</h2>
+<ul>
+<li>Transactions, updates and deletes of single rows: use a database.</li>
+<li>Arbitrary SQL: brrrrr runs the queries a stream can run, and refuses the rest with what to write instead (<a href="docs/sql.html#refused">the list</a>).</li>
+<li>Many users querying one shared cluster: one <code>brrrrr serve</code> is one machine.</li>
+</ul>

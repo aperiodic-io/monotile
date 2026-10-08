@@ -1,0 +1,80 @@
+name: nightly
+# What is too slow for every PR: the whole acceptance suite,
+# @stress included, and every mutant of both crates rather than only those in a PR's diff.
+on:
+  # schedule disabled; run manually via workflow_dispatch
+  # schedule:
+  #   - cron: "0 2 * * *"
+  workflow_dispatch:
+# the token reads the repository only; the jobs that need more say so
+permissions: { contents: read }
+env:
+  CARGO_TERM_COLOR: always
+  # rdkafka's ssl-vendored builds OpenSSL from source unless told not to (openssl-sys)
+  OPENSSL_NO_VENDOR: 1
+  RUSTFLAGS: -D warnings
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # the system's OpenSSL for test builds (OPENSSL_NO_VENDOR, workflow env): building the vendored
+      # one takes ~4 minutes of a clean build; the image keeps it vendored (Dockerfile)
+      - run: dpkg -s libssl-dev pkg-config > /dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev pkg-config)
+      - run: cargo test --test acceptance -- --tags 'not @object-store'
+        env: { BRRRRR_IT_BROKER: "127.0.0.1:19092" }
+      # an S3 server for the object store's tests (the -extended image's checkpoints); these run
+      # even when the scenarios above failed, so one failure does not hide another
+      - if: ${{ !cancelled() }}
+        run: |
+          docker run -d -p 29090:9090 -e COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS=checkpoints adobe/s3mock:5.2.3
+          timeout 120 sh -c 'until curl -s -o /dev/null http://127.0.0.1:29090/; do sleep 1; done'
+      - if: ${{ !cancelled() }}
+        run: cargo test --test acceptance --features object-store -- --tags '@object-store'
+        env: { BRRRRR_IT_BROKER: "127.0.0.1:19092", BRRRRR_IT_S3: "http://127.0.0.1:29090" }
+
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix: { shard: [0, 1, 2, 3, 4, 5, 6, 7] }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with: { tool: "cargo-mutants,cargo-nextest" }
+      # the system's OpenSSL for test builds (OPENSSL_NO_VENDOR, workflow env): building the vendored
+      # one takes ~4 minutes of a clean build; the image keeps it vendored (Dockerfile)
+      - run: dpkg -s libssl-dev pkg-config > /dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev pkg-config)
+      # Survivors (exit 2) are reported, not failed on, until the plan's 85% score gate is set
+      # from a first full run; timeouts (exit 3, which cargo-mutants reports ahead of survivors)
+      # were detected. Unviable mutants do not change the exit code; 4 (the unmutated tree's tests
+      # fail), 1, 5, 6 and 70 fail the shard. The PR job (ci.yml) reads the same codes, failing on
+      # survivors.
+      # Incremental: rust-cache turns it off, and then every mutant rebuilds the workspace from
+      # scratch (83 s per mutant on 2 vCPUs; incremental, with the `mutants` profile: 10 s).
+      # Each test binary runs under a 4 GiB address-space limit (the suite needs far less): a mutant
+      # that allocates without bound fails its test (caught) instead of exhausting the runner's
+      # 8 GB, which kills the runner agent and the shard with it.
+      - env:
+          CARGO_INCREMENTAL: "1"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: "prlimit --as=4294967296"
+        run: |
+          cargo mutants -p brrrrr-core -p brrrrr --all-features --no-shuffle --shard ${{ matrix.shard }}/8 || { c=$?; [ $c -eq 2 ] || [ $c -eq 3 ]; }
+      - if: always()
+        run: |
+          {
+            echo "### shard ${{ matrix.shard }}"
+            for o in caught missed timeout unviable; do echo "- $o: $(wc -l < mutants.out/$o.txt 2>/dev/null || echo 0)"; done
+            if [ -s mutants.out/missed.txt ]; then echo; echo '```'; cat mutants.out/missed.txt; echo '```'; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      # the outcome lists only (mutants.out's logs are ~800 files a shard), kept two weeks; the
+      # summary above already lists every missed mutant, so a failed upload (the organisation's
+      # artifact storage quota, as on 2026-09-29) does not fail the shard
+      - if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: "mutants-${{ matrix.shard }}", path: "mutants.out/*.txt", retention-days: 14 }

@@ -1,0 +1,10 @@
+<!-- title: Cookbook · brrrrr | description: The SQL queries people run on market data, sensors and logs: OHLCV bars, VWAP, TWAP, as-of joins, TCA, spreads, order flow, volatility, drawdowns, data quality and IoT. Each one tested against DuckDB. -->
+<p class="eyebrow">Cookbook</p>
+<h1>{{recipes}} queries people run</h1>
+<p class="lede">Bars, costs, flow, risk, screens, data quality and sensors. Every recipe runs in CI over the files below, and its answer must equal DuckDB's for the same files. The tables show the first rows of that answer.</p>
+<p>The data: an hour of <a href="https://github.com/aperiodic-io/monotile/blob/main/fixtures/cookbook/trades.csv">trades</a> and <a href="https://github.com/aperiodic-io/monotile/blob/main/fixtures/cookbook/quotes.csv">quotes</a> for BTC, ETH and SOL, a table of <a href="https://github.com/aperiodic-io/monotile/blob/main/fixtures/cookbook/instruments.csv">instruments</a>, and <a href="https://github.com/aperiodic-io/monotile/blob/main/fixtures/cookbook/readings.csv">readings</a> from three devices. Run any recipe on them as written, or on your own files with the same columns.</p>
+<label class="eyebrow" for="recipe-filter">Find a recipe</label>
+<input class="filter" id="recipe-filter" type="search" placeholder="vwap, asof, percentile, gaps…" autocomplete="off">
+{{cookbook}}
+<h2 id="more">Missing a query?</h2>
+<p>Tell us what you run: <a href="https://github.com/aperiodic-io/monotile/issues/new">open an issue</a> with the query and the shape of the data. Recipes are added in <a href="https://github.com/aperiodic-io/monotile/blob/main/fixtures/cookbook/cookbook.sql">fixtures/cookbook/cookbook.sql</a>, with DuckDB's answer recorded by <code>scripts/record-cookbook.py</code>.</p>

@@ -1,0 +1,20 @@
+brrrrr
+Copyright 2026 aperiodic and the brrrrr contributors
+
+This product is licensed under the Apache License, Version 2.0 (LICENSE).
+
+It includes or is derived from the following works:
+
+- ClickHouse (https://github.com/ClickHouse/ClickHouse), Apache License 2.0, through Timeplus
+  Proton (https://github.com/timeplus-io/proton), Apache License 2.0: the semantics of
+  aggregate functions, the reservoir sampler and t-digest quantiles, number formatting.
+  crates/brrrrr-core/src/agg.rs, crates/brrrrr-core/src/format.rs.
+
+- musl libc's pow (Arm Optimized Routines, 2018), MIT License:
+  crates/brrrrr-core/src/pow.rs, crates/brrrrr-core/src/pow_tables.rs.
+
+- tardis-node's order book (https://github.com/tardis-dev/tardis-node), Mozilla Public License
+  2.0: the book_snapshot_N rules followed by crates/brrrrr-core/src/book.rs.
+
+- DuckDB (https://github.com/duckdb/duckdb), MIT License: the semantics of quantile_cont,
+  which brrrrr reproduces, and the reference answers of the cookbook's tests.

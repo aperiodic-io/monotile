@@ -1,0 +1,36 @@
+name: Query or feature request
+description: SQL brrrrr refuses or cannot express yet, a function, a format, a connector
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The best requests show the query you want to run. If brrrrr refused it, its message helps us too.
+  - type: textarea
+    id: want
+    attributes:
+      label: What you want to do
+      description: The question you are answering (bars of a sort, a join, a format to read...).
+    validations: { required: true }
+  - type: textarea
+    id: query
+    attributes:
+      label: The query you would write
+      description: As you would write it in brrrrr, or in the engine you use today (DuckDB, kdb+/q, ClickHouse, pandas...), naming it.
+      render: sql
+    validations: { required: true }
+  - type: textarea
+    id: refused
+    attributes:
+      label: What brrrrr says
+      description: Its error, if it refused the query.
+  - type: textarea
+    id: data
+    attributes:
+      label: The data's shape
+      description: The columns and types, the format, and roughly how many rows.
+  - type: input
+    id: version
+    attributes:
+      label: brrrrr version
+      placeholder: brrrrr 0.1.0
