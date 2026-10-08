@@ -1516,6 +1516,10 @@ fn an_unbounded_gap_fill_leaves_gaps_too_long_to_fill() {
         assert_eq!((out.len(), e.unfilled()), (if bounds.starts_with("NULL") { 29_999 } else { 0 }, 1), "{bounds}");
         // finish excluded
     }
+    // a key's first row, from start: too far from it, left unfilled
+    let mut e = engine(&sql("0, NULL, "));
+    assert_eq!(count(&mut e, vec![row(70_000_000_000, 1.0)]), 1);
+    assert_eq!(e.unfilled(), 1);
     let mut e = engine(&sql("NULL, 100000000000, "));
     count(&mut e, vec![row(0, 1.0)]);
     let mut out = vec![];
