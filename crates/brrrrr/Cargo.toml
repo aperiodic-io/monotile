@@ -24,7 +24,7 @@ chrono = { version = "0.4", optional = true, default-features = false, features 
 async-trait = { version = "0.1", optional = true }
 futures = { version = "0.3", optional = true }
 clap = { version = "4", features = ["derive", "env"] }
-object_store = { version = "0.12", features = ["aws"], optional = true }
+object_store = { version = "0.14", features = ["aws"], optional = true }
 # `brrrrr historical`: Parquet files in, not in the default (live) binary
 parquet = { version = "60", default-features = false, features = ["arrow", "zstd", "snap", "lz4", "flate2-rust_backend", "simdutf8"], optional = true }
 rayon = { version = "1", optional = true }

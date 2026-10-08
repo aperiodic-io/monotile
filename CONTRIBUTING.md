@@ -37,6 +37,7 @@ explains how an ad-hoc query becomes the engine's own pipeline.
   instead. Nothing is silently ignored.
 - **Measure.** A change on a hot path comes with its numbers (`bench/sql`; the instruction-count gate, `cargo bench -p brrrrr-core --bench gate`).
 - **Little code.** Reuse what is there; add a dependency only when a few lines cannot do it.
+  A new dependency's licence must be one `deny.toml` allows (`cargo deny check`).
 - `cargo fmt --all` and `cargo clippy --workspace --all-targets -- -D warnings` pass.
 
 ## Sign your work

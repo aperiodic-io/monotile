@@ -2,13 +2,13 @@
 //! committed, and so are checkpoints of every example pipeline (fixtures/pipelines, among them
 //! state.sql, which holds the state the others do not), which this build must write byte for
 //! byte and restore into exactly the output of an uninterrupted run. Older versions are read only
-//! where this one only appended to them (`READS`, ADR-0008; none yet).
+//! where this one only appended to them (`READS`, ADR-0008).
 //!
 //! After a deliberate format change (see src/checkpoint.rs first),
 //! `BLESS=1 cargo test -p brrrrr-core --test all checkpoint::` rewrites the layout and the current
 //! version's checkpoints; then run the tests again without BLESS, as some read what others wrote.
 use brrrrr_core::agg::{Acc, Moment};
-use brrrrr_core::checkpoint::{fnv64, Checkpoint, LAYOUT, READS, VERSION};
+use brrrrr_core::checkpoint::{fnv64, readable, Checkpoint, LAYOUT, READS, VERSION};
 use brrrrr_core::engine::{Asof, Engine, OpState};
 use brrrrr_core::sql::parse;
 use brrrrr_core::value::Value;
@@ -354,7 +354,7 @@ fn another_version_is_refused_before_anything_is_decoded() {
     bytes[4..6].copy_from_slice(&(VERSION + 1).to_le_bytes());
     bytes.truncate(14); // nothing after the header: the version alone decides
     let err = Checkpoint::decode(&bytes).unwrap_err();
-    assert_eq!(err, format!("checkpoint format version {}; this build reads versions {VERSION}", VERSION + 1));
+    assert_eq!(err, format!("checkpoint format version {}; this build reads versions {}", VERSION + 1, readable()));
 }
 
 /// A version before the oldest one read is refused: its bytes would decode into this build's
@@ -362,10 +362,11 @@ fn another_version_is_refused_before_anything_is_decoded() {
 #[test]
 fn versions_before_the_oldest_one_read_are_refused() {
     let mut bytes = sample().encode();
-    for v in 0u16..VERSION {
+    assert_eq!(readable(), "9 and 10");
+    for v in (0u16..VERSION).filter(|v| READS.iter().all(|r| r.0 != *v)) {
         bytes[4..6].copy_from_slice(&v.to_le_bytes());
         let err = Checkpoint::decode(&bytes).unwrap_err();
-        assert_eq!(err, format!("checkpoint format version {v}; this build reads versions {VERSION}"));
+        assert_eq!(err, format!("checkpoint format version {v}; this build reads versions 9 and 10"));
     }
 }
 
@@ -393,10 +394,15 @@ fn stale_version_is_only_one_this_build_does_not_read() {
 
 // ---- older versions this one reads (`READS`) ----------------------------------------------------
 //
-// None yet. A version that only appends to the one before it keeps that version's committed
-// checkpoints (`fixtures/checkpoints/v<version>/`) and traced layout
-// (`tests/checkpoint-layout-v<version>.json`), and lists it in `READS`: these tests then prove
-// the appends and restore its checkpoints.
+// A version that only appends to the one before it keeps that version's committed checkpoints
+// (`fixtures/checkpoints/v<version>/`) and traced layout (`tests/checkpoint-layout-v<version>.json`),
+// and lists it in `READS`: these tests then prove the appends and restore its checkpoints.
+//
+// Format 9 is the format of the builds before 10, which appended `Acc::Uniq`, `Cont::All`,
+// `OpState::Fill` and `OpState::Lead` to it. Its layout is 10's without them (its hash is the
+// one those builds wrote). Its checkpoints are 10's of the pipelines whose state holds none of
+// them, under 9's header: a format only appended to writes the same bytes of the same state
+// (`format_9s_checkpoints_are_10s_of_the_pipelines_9_can_hold`).
 
 /// An older version's layout as its build traced it: `tests/checkpoint-layout.json` of the build
 /// that wrote `fixtures/checkpoints/v<version>/`, committed unchanged.
@@ -411,12 +417,46 @@ fn older_versions_are_read_under_the_layouts_their_builds_traced() {
     for (version, layout) in READS {
         assert_eq!(layout, fnv64(layout_of(version).as_bytes()), "version {version}");
         let of_version: Vec<_> = committed().into_iter().filter(|c| c.0.contains(&format!("/v{version}/"))).collect();
-        assert!(of_version.len() >= fixtures().len(), "{} committed version-{version} checkpoints", of_version.len());
+        assert!(of_version.len() >= 5, "{} committed version-{version} checkpoints", of_version.len());
         for (path, _, bytes) in of_version {
             assert_eq!(bytes[4..6], version.to_le_bytes(), "{path}");
             assert_eq!(bytes[6..14], layout.to_le_bytes(), "{path}");
         }
     }
+}
+
+/// Every committed checkpoint of this version whose state holds only what format 9's layout has
+/// is committed as format 9 too, the same bytes under 9's header; and no other is.
+#[test]
+fn format_9s_checkpoints_are_10s_of_the_pipelines_9_can_hold() {
+    let (reg, v9) = (registry(), serde_json::from_str::<Registry>(&layout_of(9)).unwrap());
+    let mut in_9 = Variants::new();
+    for (name, container) in &v9 {
+        if let ContainerFormat::Enum(vs) = container {
+            in_9.extend(vs.values().map(|v| (name.clone(), v.name.clone())));
+        }
+    }
+    let checkpoint = Format::TypeName("Checkpoint".into());
+    let (mut held, mut not) = (0, 0);
+    for (path, _, bytes) in committed().into_iter().filter(|c| c.0.contains(&format!("/v{VERSION}/"))) {
+        let mut seen = Variants::new();
+        variants(&reg, &checkpoint, &serde_json::to_value(Checkpoint::decode(&bytes).unwrap()).unwrap(), &mut seen);
+        let as_9 = std::fs::read(path.replace(&format!("/v{VERSION}/"), "/v9/")).ok();
+        if seen.is_subset(&in_9) {
+            let as_9 = as_9.unwrap_or_else(|| panic!("{path}: format 9 can hold it, and it is not committed as 9"));
+            assert_eq!(as_9[4..14], [&9u16.to_le_bytes()[..], &READS[0].1.to_le_bytes()].concat(), "{path}");
+            assert!(as_9[14..] == bytes[14..], "{path}: format 9's bytes differ");
+            held += 1;
+        } else {
+            assert!(
+                as_9.is_none(),
+                "{path} holds {:?}, which format 9 cannot",
+                seen.difference(&in_9).collect::<Vec<_>>()
+            );
+            not += 1;
+        }
+    }
+    assert!(held >= 5 && not >= 1, "{held} pipelines' checkpoints format 9 holds, {not} it does not");
 }
 
 /// Why an older version's bytes decode into this build's types unchanged: postcard writes no

@@ -1475,6 +1475,63 @@ fn the_example_pipelines_group_as_their_joins_and_aggregates_connect_them() {
     assert_eq!(flow, [vec!["spot_trades".to_string(), "trades".to_string()]]);
 }
 
+/// A `gap_fill` without both a start and a finish fills a gap of at most 65,536 buckets: a row
+/// with a stray time decades off is written as it is, and the gap before it is counted
+/// (`unfilled`) rather than filled with a row a second. One bounded by both is filled whole,
+/// and times at i64's ends interpolate without overflowing.
+#[test]
+fn an_unbounded_gap_fill_leaves_gaps_too_long_to_fill() {
+    let sql = |bounds: &str| {
+        format!(
+            "CREATE STREAM IF NOT EXISTS bars (t datetime64(6), k string, m nullable(float64));
+         CREATE EXTERNAL STREAM IF NOT EXISTS out (t datetime64(6), k string, m nullable(float64))
+           SETTINGS type = 'kafka', topic = 'out', data_format = 'JSONEachRow';
+         CREATE MATERIALIZED VIEW IF NOT EXISTS f INTO out AS
+         SELECT t, k, m FROM gap_fill(bars, t, '1s', {bounds}k, interpolate(m));"
+        )
+    };
+    let row = |us: i64, m: f64| vec![Value::Time(us), s("a"), f(m)];
+    let count = |e: &mut Engine, rows: Vec<Vec<Value>>| push(e, "bars", rows).len();
+    let mut e = engine(&sql(""));
+    // a gap of 65,536 buckets is filled; one more is not
+    assert_eq!(count(&mut e, vec![row(0, 1.0), row(65_537_000_000, 2.0)]), 65_538);
+    assert_eq!(e.unfilled(), 0);
+    assert_eq!(count(&mut e, vec![row(65_537_000_000 + 65_538_000_000, 3.0)]), 1);
+    assert_eq!(e.unfilled(), 1);
+    // a stray time at either end of time: no overflow, nothing filled
+    assert_eq!(count(&mut e, vec![row(i64::MAX - 1, 4.0), row(i64::MIN + 1, 5.0)]), 2);
+    assert_eq!(e.unfilled(), 2);
+    // bounded by start and finish, a gap is filled whole, however long
+    let mut e = engine(&sql("0, 100000000000, "));
+    assert_eq!(count(&mut e, vec![row(0, 1.0), row(70_000_000_000, 2.0)]), 70_001);
+    assert_eq!(e.unfilled(), 0);
+    // with either end NULL, unbounded
+    for bounds in ["NULL, 100000000000, ", "0, NULL, "] {
+        let mut e = engine(&sql(bounds));
+        assert_eq!(count(&mut e, vec![row(0, 1.0), row(70_000_000_000, 2.0)]), 2, "{bounds}");
+        assert_eq!(e.unfilled(), 1, "{bounds}");
+        // after a key's last row, up to finish as the input passes it (a gap short enough)
+        let mut out = vec![];
+        e.close_until(i64::MAX, &mut out);
+        assert_eq!((out.len(), e.unfilled()), (if bounds.starts_with("NULL") { 29_999 } else { 0 }, 1), "{bounds}");
+        // finish excluded
+    }
+    // a key's first row, from start: too far from it, left unfilled
+    let mut e = engine(&sql("0, NULL, "));
+    assert_eq!(count(&mut e, vec![row(70_000_000_000, 1.0)]), 1);
+    assert_eq!(e.unfilled(), 1);
+    let mut e = engine(&sql("NULL, 100000000000, "));
+    count(&mut e, vec![row(0, 1.0)]);
+    let mut out = vec![];
+    e.close_until(i64::MAX, &mut out);
+    assert_eq!((out.len(), e.unfilled()), (0, 1), "100,000 buckets to finish: left unfilled");
+    // between rows at i64's ends, the bounded gap's rows interpolate without overflowing
+    let mut e = engine(&sql("0, 3000000, "));
+    let got = push(&mut e, "bars", vec![row(i64::MIN + 1, 0.0), row(i64::MAX - 1, 1.0)]);
+    assert_eq!(got.len(), 5, "{got:?}");
+    assert!(got[1].contains(r#""m":0.5"#), "{got:?}");
+}
+
 /// `gap_fill` over a stream's rows as they come: a key's skipped buckets before its next row,
 /// rows without a time or not after the key's last bucket as they are, and the buckets after a
 /// key's last row up to `finish` only as the input passes them (`close_until`).

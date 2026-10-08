@@ -385,6 +385,9 @@ Feature: brrrrr serve: live tables, live views, and their history
     Then the answer says "canceling statement due to user request"
     And within 5 seconds the server's metrics say "brrrrr_statements_canceled_total 1"
     And within 5 seconds the server's metrics say "brrrrr_statements_timed_out_total 2"
+    # a stop is counted when it is made; the statement ends at its next batch of rows, and only
+    # then gives its turn (--max-queries 1) to the next
+    And within 5 seconds the server's metrics say "brrrrr_statements_running 0"
     When I query over HTTP:
       """
       SELECT 1 AS one

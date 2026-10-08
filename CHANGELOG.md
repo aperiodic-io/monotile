@@ -26,5 +26,6 @@ query time limits, cancellation and admission come with it.
 **Pipelines.** `brrrrr run` runs the same SQL from Kafka topics of JSON to Kafka, exactly once
 across crashes, with checkpoints.
 
-Pipelines written in Timeplus Proton's dialect run unchanged. Checkpoints start fresh with this
-release: none written by earlier builds is read.
+Pipelines written in Timeplus Proton's dialect run unchanged. Checkpoints are format 10; those
+of format 9, written by builds before this release, are restored and written back as 10 at the
+next checkpoint. Nothing older is read.

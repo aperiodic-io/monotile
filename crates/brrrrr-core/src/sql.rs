@@ -1,7 +1,7 @@
 //! Proton's pipeline SQL: a token-level DDL envelope parser,
 //! with query bodies and expressions parsed by `sqlparser` (docs/adr/0003).
 use crate::value::Type;
-use sqlparser::ast::{visit_expressions_mut, visit_relations_mut, Expr, Ident, ObjectNamePart, Query};
+use sqlparser::ast::{visit_expressions_mut, visit_relations_mut, Expr, Ident, ObjectNamePart, Query, VisitMut};
 use sqlparser::dialect::ClickHouseDialect;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer, Whitespace, Word};
@@ -475,7 +475,7 @@ fn splice(
             });
             ControlFlow::<()>::Continue(())
         });
-        let _ = visit_expressions_mut(&mut v.query, |e| {
+        visit_exprs_mut(&mut v.query, |e| {
             match e {
                 Expr::Identifier(i) => rename(i),
                 Expr::CompoundIdentifier(ids) => ids.iter_mut().for_each(rename),
@@ -489,6 +489,13 @@ fn splice(
         cat.views.push(v);
     }
     Ok(())
+}
+
+/// sqlparser's `visit_expressions_mut` with the closure behind `dyn`: its walk over the whole
+/// syntax tree is compiled once per node type, not once per closure (megabytes of the binary).
+pub fn visit_exprs_mut<V: VisitMut>(v: &mut V, mut f: impl FnMut(&mut Expr) -> ControlFlow<()>) {
+    let f: &mut dyn FnMut(&mut Expr) -> ControlFlow<()> = &mut f;
+    let _ = visit_expressions_mut(v, f);
 }
 
 /// Parses a whole bootstrap script. Statements are separated by `;`; comments are ignored.

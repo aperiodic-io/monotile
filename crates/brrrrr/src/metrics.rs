@@ -92,6 +92,7 @@ pub struct Metrics {
     pub late: AtomicU64,
     pub future: AtomicU64,
     pub null_time: AtomicU64,
+    pub unfilled: AtomicU64,
     /// Quotes an exact ASOF join took after a trade they may have matched was released
     /// (`Engine::asof_late_right`): `--asof-lateness-ms` is too short for the feed when it grows.
     pub asof_late_right: AtomicU64,
@@ -210,6 +211,12 @@ impl Metrics {
                 "counter",
                 "rows dropped by windows and ASOF joins for an event time that is NULL or not a time",
                 g(&self.null_time) as f64,
+            ),
+            (
+                "brrrrr_unfilled_gaps_total",
+                "counter",
+                "gaps gap_fill did not fill: more than 65536 buckets, without both a start and a finish",
+                g(&self.unfilled) as f64,
             ),
             (
                 "brrrrr_asof_late_right_total",
@@ -533,6 +540,7 @@ mod tests {
         m.book_stale.store(9, Relaxed);
         m.book_caught_up.store(2, Relaxed);
         m.null_time.store(5, Relaxed);
+        m.unfilled.store(6, Relaxed);
         m.asof_late_right.store(6, Relaxed);
         m.source_resume_gaps.store(2, Relaxed);
         m.source_resume_skipped.store(500, Relaxed);
@@ -544,6 +552,7 @@ mod tests {
         assert_eq!(value(&text, "brrrrr_book_snapshots_caught_up_total"), "2");
         assert_eq!(value(&text, "brrrrr_received_events_total"), "7");
         assert_eq!(value(&text, "brrrrr_null_time_events_total"), "5");
+        assert_eq!(value(&text, "brrrrr_unfilled_gaps_total"), "6");
         assert_eq!(value(&text, "brrrrr_asof_late_right_total"), "6");
         assert_eq!(value(&text, "brrrrr_checkpoint_failures_total"), "3");
         assert_eq!(value(&text, "brrrrr_watermark_seconds"), "1.5");

@@ -36,12 +36,12 @@
 use crate::column::{Batch, Col, Data};
 use crate::engine::{Emit, Historical, Output, Pool, Row};
 use crate::expr::order_by;
-use crate::sql::{token_sql, Catalog, Column, Kind, Stream, View};
+use crate::sql::{token_sql, visit_exprs_mut, Catalog, Column, Kind, Stream, View};
 use crate::value::{Type, Value};
 use sqlparser::ast::{
-    self, visit_expressions_mut, BinaryOperator, Distinct, Expr, FunctionArg, FunctionArgExpr, FunctionArguments,
-    GroupByExpr, Ident, JoinConstraint, JoinOperator, ObjectName, Query, Select, SelectItem, SetExpr, SetOperator,
-    SetQuantifier, Statement, TableAlias, TableFactor, Value as AstValue,
+    self, BinaryOperator, Distinct, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident,
+    JoinConstraint, JoinOperator, ObjectName, Query, Select, SelectItem, SetExpr, SetOperator, SetQuantifier,
+    Statement, TableAlias, TableFactor, Value as AstValue,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -1043,7 +1043,7 @@ fn args(e: &Expr) -> Vec<Expr> {
 fn has_aggregate(e: &Expr) -> bool {
     let mut found = false;
     let mut e = e.clone();
-    let _ = visit_expressions_mut(&mut e, |x| {
+    visit_exprs_mut(&mut e, |x| {
         found |= matches!(x, Expr::Function(f) if is_aggregate_call(f));
         ControlFlow::<()>::Continue(())
     });
@@ -1103,7 +1103,7 @@ fn parametric(name: &str, level: Expr, arg: Expr) -> Expr {
 /// `quantile_exact(p)(x)` (DuckDB's percentile, exact however many values), `count(DISTINCT x)`
 /// as `uniq_exact(x)`, `ema(x, n) OVER (...)` as the engine's `avg(x, 'period', n) OVER (...)`.
 fn rename_functions(e: &mut Expr) {
-    let _ = visit_expressions_mut(e, |x| {
+    visit_exprs_mut(e, |x| {
         let Expr::Function(f) = x else { return ControlFlow::<()>::Continue(()) };
         // `count(DISTINCT x)` is `uniq_exact(x)`, `min`/`max(DISTINCT x)` are `min`/`max(x)`; any
         // other DISTINCT stays, for the compiler to refuse
@@ -1208,7 +1208,7 @@ fn number_text(n: &str) -> Expr {
 fn has_window_function(e: &Expr) -> bool {
     let mut found = false;
     let mut e = e.clone();
-    let _ = visit_expressions_mut(&mut e, |x| {
+    visit_exprs_mut(&mut e, |x| {
         if matches!(x, Expr::Function(f) if f.over.is_some()) {
             found = true;
         }
@@ -1564,7 +1564,7 @@ impl Ctx<'_> {
                 let mut used: Vec<String> = vec![item_name(col)];
                 for (a, _) in &aggs {
                     let mut a = a.clone();
-                    let _ = visit_expressions_mut(&mut a, |x| {
+                    visit_exprs_mut(&mut a, |x| {
                         if matches!(x, Expr::Identifier(_) | Expr::CompoundIdentifier(_)) {
                             used.push(item_name(x));
                         }
@@ -1840,7 +1840,7 @@ impl Ctx<'_> {
         for (k, t) in within {
             let all: Vec<&Scoped> = scopes.iter().collect();
             let from = std::mem::take(&mut s.from);
-            let _ = visit_expressions_mut(&mut s, |x| {
+            visit_exprs_mut(&mut s, |x| {
                 if resolve_col(x, &all).is_some_and(|(sc, _)| std::ptr::eq(sc, &scopes[k])) {
                     *x = Expr::Case {
                         case_token: ast::helpers::attached_token::AttachedToken::empty(),
@@ -1870,7 +1870,7 @@ impl Ctx<'_> {
                     SelectItem::ExprWithAlias { expr, .. } => expr.clone(),
                     _ => return false,
                 };
-                let _ = visit_expressions_mut(&mut e, |x| {
+                visit_exprs_mut(&mut e, |x| {
                     found |= matches!(x, Expr::Function(f) if f.over.is_some() && function_name(x).as_deref() == Some("lead"));
                     ControlFlow::<()>::Continue(())
                 });
@@ -1919,7 +1919,7 @@ impl Ctx<'_> {
             // true: the right relation's; None: no qualifier names it
             let mut q = None;
             let mut e = e.clone();
-            let _ = visit_expressions_mut(&mut e, |x| {
+            visit_exprs_mut(&mut e, |x| {
                 match x {
                     Expr::CompoundIdentifier(ids) if ids.len() == 2 => {
                         let name = &ids[0].value;
@@ -2166,7 +2166,7 @@ impl Ctx<'_> {
                 SelectItem::ExprWithAlias { expr, .. } => expr.clone(),
                 _ => continue,
             };
-            let _ = visit_expressions_mut(&mut e, |x| {
+            visit_exprs_mut(&mut e, |x| {
                 if let Expr::Function(f) = x {
                     if let Some(ast::WindowType::WindowSpec(w)) = &f.over {
                         if let Some(o) = w.order_by.first() {
@@ -2207,7 +2207,7 @@ impl Ctx<'_> {
         let mut err = None;
         for item in &mut s.projection {
             let SelectItem::ExprWithAlias { expr, .. } = item else { continue };
-            let _ = visit_expressions_mut(expr, |x| {
+            visit_exprs_mut(expr, |x| {
                 let Expr::Function(f) = x else { return ControlFlow::<()>::Continue(()) };
                 let name = f.name.to_string().to_ascii_lowercase();
                 let ema = name == "avg" && args(&Expr::Function(f.clone())).len() == 3;
@@ -2390,7 +2390,7 @@ impl Ctx<'_> {
         let zoned = zone.as_ref().map(|_| item_name(keys.last().expect("the zone's bucket")));
         // the window's own scope: one stream, its columns by name
         let unqualify = |e: &mut Expr, rename: &HashMap<String, String>| {
-            let _ = visit_expressions_mut(e, |x| {
+            visit_exprs_mut(e, |x| {
                 let r = match x {
                     Expr::CompoundIdentifier(ids) if ids.len() == 2 => Some(
                         rename
@@ -2498,7 +2498,7 @@ impl Ctx<'_> {
                     ident(&name)
                 };
                 // locf(x) and interpolate(x) first: x whole, its aggregates in it
-                let _ = visit_expressions_mut(&mut expr, |x| {
+                visit_exprs_mut(&mut expr, |x| {
                     if let Some(m @ ("locf" | "interpolate")) = function_name(x).as_deref() {
                         match args(x).as_slice() {
                             [a] => *x = add(a.clone(), Some(m), &mut out),
@@ -2507,7 +2507,7 @@ impl Ctx<'_> {
                     }
                     ControlFlow::<()>::Continue(())
                 });
-                let _ = visit_expressions_mut(&mut expr, |x| {
+                visit_exprs_mut(&mut expr, |x| {
                     if matches!(x, Expr::Function(f) if is_aggregate_call(f)) {
                         *x = add(x.clone(), None, &mut out);
                     } else if matches!(x, Expr::Identifier(i) if i.value == "window_start") {
@@ -2618,7 +2618,7 @@ impl Ctx<'_> {
         let mut refs: Vec<(Option<String>, String)> = vec![];
         let mut note = |e: &Expr| {
             let mut e = e.clone();
-            let _ = visit_expressions_mut(&mut e, |x| {
+            visit_exprs_mut(&mut e, |x| {
                 match x {
                     Expr::Identifier(i) => refs.push((None, i.value.clone())),
                     Expr::CompoundIdentifier(ids) if ids.len() == 2 => {
@@ -2747,7 +2747,7 @@ fn inline_windows(s: &mut Select) -> R<()> {
     let mut missing = None;
     for item in &mut s.projection {
         let (SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. }) = item else { continue };
-        let _ = visit_expressions_mut(e, |x| {
+        visit_exprs_mut(e, |x| {
             if let Expr::Function(f) = x {
                 if let Some(ast::WindowType::NamedWindow(n)) = &f.over {
                     match defs.get(&n.value) {

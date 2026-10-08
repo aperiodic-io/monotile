@@ -1,0 +1,1349 @@
+{
+  "Acc": {
+    "ENUM": {
+      "0": {
+        "Latest": {
+          "NEWTYPE": {
+            "TYPENAME": "Value"
+          }
+        }
+      },
+      "1": {
+        "Earliest": {
+          "NEWTYPE": {
+            "TYPENAME": "Value"
+          }
+        }
+      },
+      "2": {
+        "Sum": {
+          "NEWTYPE": {
+            "TYPENAME": "Value"
+          }
+        }
+      },
+      "3": {
+        "Avg": {
+          "STRUCT": [
+            {
+              "sum": "F64"
+            },
+            {
+              "n": "U64"
+            }
+          ]
+        }
+      },
+      "4": {
+        "Min": {
+          "NEWTYPE": {
+            "TYPENAME": "Value"
+          }
+        }
+      },
+      "5": {
+        "Max": {
+          "NEWTYPE": {
+            "TYPENAME": "Value"
+          }
+        }
+      },
+      "6": {
+        "Count": {
+          "STRUCT": [
+            {
+              "n": "U64"
+            },
+            {
+              "rows": "BOOL"
+            }
+          ]
+        }
+      },
+      "7": {
+        "Moments": {
+          "STRUCT": [
+            {
+              "m": {
+                "TUPLEARRAY": {
+                  "CONTENT": "F64",
+                  "SIZE": 5
+                }
+              }
+            },
+            {
+              "kind": {
+                "TYPENAME": "Moment"
+              }
+            },
+            {
+              "f32": "BOOL"
+            },
+            {
+              "seen": "BOOL"
+            }
+          ]
+        }
+      },
+      "8": {
+        "Quantile": {
+          "STRUCT": [
+            {
+              "level": "F64"
+            },
+            {
+              "sampler": {
+                "TYPENAME": "Reservoir"
+              }
+            }
+          ]
+        }
+      },
+      "9": {
+        "TDigest": {
+          "STRUCT": [
+            {
+              "level": "F64"
+            },
+            {
+              "digest": {
+                "TYPENAME": "TDigest"
+              }
+            }
+          ]
+        }
+      },
+      "10": {
+        "RunStructure": {
+          "NEWTYPE": {
+            "TUPLE": [
+              {
+                "SEQ": {
+                  "TUPLE": [
+                    {
+                      "TUPLEARRAY": {
+                        "CONTENT": "I64",
+                        "SIZE": 2
+                      }
+                    },
+                    {
+                      "TUPLE": [
+                        "BOOL",
+                        "F64"
+                      ]
+                    }
+                  ]
+                }
+              },
+              {
+                "OPTION": {
+                  "TUPLEARRAY": {
+                    "CONTENT": "I64",
+                    "SIZE": 2
+                  }
+                }
+              },
+              "I64",
+              {
+                "TYPENAME": "Runs"
+              }
+            ]
+          }
+        }
+      },
+      "11": {
+        "UpDownTicks": {
+          "NEWTYPE": {
+            "TUPLE": [
+              {
+                "SEQ": {
+                  "TUPLE": [
+                    {
+                      "TUPLE": [
+                        "I64",
+                        "STR"
+                      ]
+                    },
+                    {
+                      "TUPLEARRAY": {
+                        "CONTENT": "F64",
+                        "SIZE": 2
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "OPTION": {
+                  "TUPLE": [
+                    "I64",
+                    "STR"
+                  ]
+                }
+              },
+              "I64",
+              {
+                "TYPENAME": "Ticks"
+              }
+            ]
+          }
+        }
+      },
+      "12": {
+        "Weighted": {
+          "STRUCT": [
+            {
+              "xw": "F64"
+            },
+            {
+              "w": "F64"
+            }
+          ]
+        }
+      },
+      "13": {
+        "Twap": {
+          "NEWTYPE": {
+            "TYPENAME": "Twap"
+          }
+        }
+      },
+      "14": {
+        "Arg": {
+          "STRUCT": [
+            {
+              "max": "BOOL"
+            },
+            {
+              "key_x": {
+                "TUPLEARRAY": {
+                  "CONTENT": {
+                    "TYPENAME": "Value"
+                  },
+                  "SIZE": 2
+                }
+              }
+            }
+          ]
+        }
+      },
+      "15": {
+        "Corr": {
+          "NEWTYPE": {
+            "TYPENAME": "Corr"
+          }
+        }
+      },
+      "16": {
+        "ShiftedMoments": {
+          "STRUCT": [
+            {
+              "n": "U64"
+            },
+            {
+              "shift": "F64"
+            },
+            {
+              "s": {
+                "TUPLEARRAY": {
+                  "CONTENT": "F64",
+                  "SIZE": 4
+                }
+              }
+            },
+            {
+              "kind": {
+                "TYPENAME": "Moment"
+              }
+            }
+          ]
+        }
+      },
+      "17": {
+        "If": {
+          "NEWTYPE": {
+            "TYPENAME": "Acc"
+          }
+        }
+      },
+      "18": {
+        "QuantileOf": {
+          "STRUCT": [
+            {
+              "level": "F64"
+            },
+            {
+              "of": "U64"
+            }
+          ]
+        }
+      },
+      "19": {
+        "TradeReturns": {
+          "NEWTYPE": {
+            "TUPLE": [
+              {
+                "SEQ": {
+                  "TUPLE": [
+                    {
+                      "TUPLE": [
+                        "I64",
+                        {
+                          "TUPLEARRAY": {
+                            "CONTENT": {
+                              "TYPENAME": "Tie"
+                            },
+                            "SIZE": 2
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "TUPLE": [
+                        "BOOL",
+                        "F64",
+                        "F64"
+                      ]
+                    }
+                  ]
+                }
+              },
+              {
+                "OPTION": {
+                  "TUPLE": [
+                    "I64",
+                    {
+                      "TUPLEARRAY": {
+                        "CONTENT": {
+                          "TYPENAME": "Tie"
+                        },
+                        "SIZE": 2
+                      }
+                    }
+                  ]
+                }
+              },
+              "I64",
+              {
+                "TYPENAME": "Returns"
+              }
+            ]
+          }
+        }
+      },
+      "20": {
+        "DistinctStats": {
+          "NEWTYPE": {
+            "TUPLE": [
+              {
+                "SEQ": {
+                  "TUPLE": [
+                    {
+                      "TUPLE": [
+                        "I64",
+                        {
+                          "TYPENAME": "Tie"
+                        }
+                      ]
+                    },
+                    {
+                      "OPTION": "F64"
+                    }
+                  ]
+                }
+              },
+              {
+                "OPTION": {
+                  "TUPLE": [
+                    "I64",
+                    {
+                      "TYPENAME": "Tie"
+                    }
+                  ]
+                }
+              },
+              "I64",
+              {
+                "TYPENAME": "Distinct"
+              }
+            ]
+          }
+        }
+      },
+      "21": {
+        "Cont": {
+          "STRUCT": [
+            {
+              "level": "F64"
+            },
+            {
+              "values": {
+                "TYPENAME": "Cont"
+              }
+            }
+          ]
+        }
+      },
+      "22": {
+        "TradeReversal": {
+          "NEWTYPE": {
+            "TUPLE": [
+              {
+                "SEQ": {
+                  "TUPLE": [
+                    {
+                      "TUPLE": [
+                        "I64",
+                        {
+                          "TUPLEARRAY": {
+                            "CONTENT": {
+                              "TYPENAME": "Tie"
+                            },
+                            "SIZE": 2
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "TUPLEARRAY": {
+                        "CONTENT": "F64",
+                        "SIZE": 2
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "OPTION": {
+                  "TUPLE": [
+                    "I64",
+                    {
+                      "TUPLEARRAY": {
+                        "CONTENT": {
+                          "TYPENAME": "Tie"
+                        },
+                        "SIZE": 2
+                      }
+                    }
+                  ]
+                }
+              },
+              "I64",
+              {
+                "TYPENAME": "Reversal"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "Applied": {
+    "STRUCT": [
+      {
+        "time": "I64"
+      },
+      {
+        "seq": "I64"
+      },
+      {
+        "bids": {
+          "SEQ": {
+            "TYPENAME": "Level"
+          }
+        }
+      },
+      {
+        "asks": {
+          "SEQ": {
+            "TYPENAME": "Level"
+          }
+        }
+      }
+    ]
+  },
+  "Book": {
+    "STRUCT": [
+      {
+        "depth": "U64"
+      },
+      {
+        "bids": {
+          "TYPENAME": "Side"
+        }
+      },
+      {
+        "asks": {
+          "TYPENAME": "Side"
+        }
+      },
+      {
+        "initialized": "BOOL"
+      },
+      {
+        "top_bids": {
+          "SEQ": {
+            "TYPENAME": "Level"
+          }
+        }
+      },
+      {
+        "top_asks": {
+          "SEQ": {
+            "TYPENAME": "Level"
+          }
+        }
+      },
+      {
+        "rejected": "U64"
+      }
+    ]
+  },
+  "Checkpoint": {
+    "STRUCT": [
+      {
+        "epoch": "U64"
+      },
+      {
+        "plan": "U64"
+      },
+      {
+        "sources": {
+          "SEQ": {
+            "TUPLE": [
+              "STR",
+              "I32",
+              "I64"
+            ]
+          }
+        }
+      },
+      {
+        "sinks": {
+          "SEQ": {
+            "TUPLE": [
+              "STR",
+              "I32",
+              "I64"
+            ]
+          }
+        }
+      },
+      {
+        "state": {
+          "TYPENAME": "State"
+        }
+      },
+      {
+        "withhold": {
+          "OPTION": {
+            "TYPENAME": "Withhold"
+          }
+        }
+      }
+    ]
+  },
+  "Cont": {
+    "ENUM": {
+      "0": {
+        "Exact": {
+          "NEWTYPE": {
+            "SEQ": "F64"
+          }
+        }
+      },
+      "1": {
+        "Digest": {
+          "NEWTYPE": {
+            "TYPENAME": "TDigest"
+          }
+        }
+      }
+    }
+  },
+  "Corr": {
+    "STRUCT": [
+      {
+        "n": "F64"
+      },
+      {
+        "mx": "F64"
+      },
+      {
+        "my": "F64"
+      },
+      {
+        "sxx": "F64"
+      },
+      {
+        "syy": "F64"
+      },
+      {
+        "sxy": "F64"
+      }
+    ]
+  },
+  "Distinct": {
+    "STRUCT": [
+      {
+        "prev": {
+          "OPTION": {
+            "OPTION": "F64"
+          }
+        }
+      },
+      {
+        "values": {
+          "TYPENAME": "Shifted"
+        }
+      },
+      {
+        "changes": {
+          "TYPENAME": "Shifted"
+        }
+      }
+    ]
+  },
+  "FnState": {
+    "ENUM": {
+      "0": {
+        "Acc": {
+          "NEWTYPE": {
+            "TYPENAME": "Acc"
+          }
+        }
+      },
+      "1": {
+        "Frame": {
+          "NEWTYPE": {
+            "SEQ": {
+              "TUPLE": [
+                "U64",
+                "I64",
+                {
+                  "TYPENAME": "Value"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "2": {
+        "Values": {
+          "NEWTYPE": {
+            "SEQ": {
+              "TYPENAME": "Value"
+            }
+          }
+        }
+      },
+      "3": {
+        "Ema": {
+          "NEWTYPE": {
+            "OPTION": "F64"
+          }
+        }
+      },
+      "4": {
+        "First": {
+          "NEWTYPE": {
+            "OPTION": {
+              "TYPENAME": "Value"
+            }
+          }
+        }
+      },
+      "5": {
+        "Rows": {
+          "NEWTYPE": "U64"
+        }
+      }
+    }
+  },
+  "GroupState": {
+    "STRUCT": [
+      {
+        "used": "U64"
+      },
+      {
+        "evicted": "U64"
+      },
+      {
+        "truncated": "U64"
+      },
+      {
+        "parts": {
+          "SEQ": {
+            "TUPLE": [
+              "STR",
+              {
+                "TYPENAME": "Part"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "Guard": {
+    "STRUCT": [
+      {
+        "allow_seq_reset": "BOOL"
+      },
+      {
+        "last_seq": "I64"
+      },
+      {
+        "last_time": "I64"
+      },
+      {
+        "seeded": "BOOL"
+      }
+    ]
+  },
+  "Kept": {
+    "STRUCT": [
+      {
+        "from": {
+          "TUPLEARRAY": {
+            "CONTENT": "I64",
+            "SIZE": 2
+          }
+        }
+      },
+      {
+        "diffs": {
+          "SEQ": {
+            "TYPENAME": "Applied"
+          }
+        }
+      }
+    ]
+  },
+  "Level": {
+    "STRUCT": [
+      {
+        "price": "F64"
+      },
+      {
+        "amount": "F64"
+      }
+    ]
+  },
+  "Moment": {
+    "ENUM": {
+      "0": {
+        "VarSamp": "UNIT"
+      },
+      "1": {
+        "StddevSamp": "UNIT"
+      },
+      "2": {
+        "SkewSamp": "UNIT"
+      },
+      "3": {
+        "KurtSamp": "UNIT"
+      },
+      "4": {
+        "Skewness": "UNIT"
+      },
+      "5": {
+        "Kurtosis": "UNIT"
+      },
+      "6": {
+        "KurtosisPop": "UNIT"
+      },
+      "7": {
+        "Variance": "UNIT"
+      },
+      "8": {
+        "Stddev": "UNIT"
+      }
+    }
+  },
+  "OpState": {
+    "ENUM": {
+      "0": {
+        "Stateless": "UNIT"
+      },
+      "1": {
+        "Window": {
+          "STRUCT": [
+            {
+              "watermark": "I64"
+            },
+            {
+              "max_ts": "I64"
+            },
+            {
+              "late": "U64"
+            },
+            {
+              "open": {
+                "SEQ": {
+                  "TUPLE": [
+                    {
+                      "TUPLE": [
+                        "I64",
+                        "STR"
+                      ]
+                    },
+                    {
+                      "TUPLE": [
+                        {
+                          "SEQ": {
+                            "TYPENAME": "Value"
+                          }
+                        },
+                        {
+                          "SEQ": {
+                            "TYPENAME": "Acc"
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "2": {
+        "Join": {
+          "STRUCT": [
+            {
+              "sides": {
+                "SEQ": {
+                  "SEQ": {
+                    "TYPENAME": "OpState"
+                  }
+                }
+              }
+            },
+            {
+              "versions": {
+                "SEQ": {
+                  "SEQ": {
+                    "TUPLE": [
+                      "STR",
+                      {
+                        "SEQ": {
+                          "TUPLE": [
+                            {
+                              "TYPENAME": "Value"
+                            },
+                            {
+                              "SEQ": {
+                                "TYPENAME": "Value"
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "3": {
+        "Over": {
+          "STRUCT": [
+            {
+              "groups": {
+                "SEQ": {
+                  "TYPENAME": "GroupState"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "4": {
+        "JoinHeld": {
+          "STRUCT": [
+            {
+              "sides": {
+                "SEQ": {
+                  "SEQ": {
+                    "TYPENAME": "OpState"
+                  }
+                }
+              }
+            },
+            {
+              "versions": {
+                "SEQ": {
+                  "SEQ": {
+                    "TUPLE": [
+                      "STR",
+                      {
+                        "SEQ": {
+                          "TUPLE": [
+                            {
+                              "TYPENAME": "Value"
+                            },
+                            {
+                              "SEQ": {
+                                "TYPENAME": "Value"
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "held": {
+                "SEQ": {
+                  "TUPLE": [
+                    {
+                      "SEQ": "I64"
+                    },
+                    {
+                      "SEQ": {
+                        "TYPENAME": "Value"
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "right_max": {
+                "SEQ": "I64"
+              }
+            },
+            {
+              "left_max": "I64"
+            }
+          ]
+        }
+      },
+      "5": {
+        "Hold": {
+          "STRUCT": [
+            {
+              "held": {
+                "SEQ": {
+                  "TUPLE": [
+                    "I64",
+                    {
+                      "SEQ": {
+                        "TYPENAME": "Value"
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "max": "I64"
+            },
+            {
+              "released": "I64"
+            }
+          ]
+        }
+      },
+      "6": {
+        "Book": {
+          "STRUCT": [
+            {
+              "books": {
+                "SEQ": {
+                  "TUPLE": [
+                    "STR",
+                    {
+                      "TYPENAME": "Book"
+                    },
+                    {
+                      "TYPENAME": "Guard"
+                    },
+                    {
+                      "TYPENAME": "Kept"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "Part": {
+    "STRUCT": [
+      {
+        "keys": {
+          "SEQ": {
+            "TYPENAME": "Value"
+          }
+        }
+      },
+      {
+        "used": "U64"
+      },
+      {
+        "latest": "I64"
+      },
+      {
+        "rows": "U64"
+      },
+      {
+        "fns": {
+          "SEQ": {
+            "TYPENAME": "FnState"
+          }
+        }
+      }
+    ]
+  },
+  "Reservoir": {
+    "STRUCT": [
+      {
+        "samples": {
+          "SEQ": "F64"
+        }
+      },
+      {
+        "total": "U64"
+      },
+      {
+        "rng": "U64"
+      },
+      {
+        "sorted": "BOOL"
+      }
+    ]
+  },
+  "Returns": {
+    "STRUCT": [
+      {
+        "first": {
+          "OPTION": "F64"
+        }
+      },
+      {
+        "last": {
+          "OPTION": "F64"
+        }
+      },
+      {
+        "sq": "F64"
+      },
+      {
+        "cn": "F64"
+      },
+      {
+        "cmr": "F64"
+      },
+      {
+        "cms": "F64"
+      },
+      {
+        "crs": "F64"
+      },
+      {
+        "size": {
+          "TYPENAME": "Shifted"
+        }
+      },
+      {
+        "buy": {
+          "TUPLE": [
+            "F64",
+            "U64"
+          ]
+        }
+      },
+      {
+        "sell": {
+          "TUPLE": [
+            "F64",
+            "U64"
+          ]
+        }
+      }
+    ]
+  },
+  "Reversal": {
+    "STRUCT": [
+      {
+        "k": "U64"
+      },
+      {
+        "level": "F64"
+      },
+      {
+        "trades": {
+          "SEQ": {
+            "TUPLEARRAY": {
+              "CONTENT": "F64",
+              "SIZE": 2
+            }
+          }
+        }
+      }
+    ]
+  },
+  "Runs": {
+    "STRUCT": [
+      {
+        "last": {
+          "OPTION": {
+            "TUPLE": [
+              "BOOL",
+              "F64"
+            ]
+          }
+        }
+      },
+      {
+        "run": "U64"
+      },
+      {
+        "max": {
+          "TUPLEARRAY": {
+            "CONTENT": "U64",
+            "SIZE": 2
+          }
+        }
+      },
+      {
+        "len": {
+          "TUPLEARRAY": {
+            "CONTENT": "U64",
+            "SIZE": 2
+          }
+        }
+      },
+      {
+        "runs": {
+          "TUPLEARRAY": {
+            "CONTENT": "U64",
+            "SIZE": 2
+          }
+        }
+      },
+      {
+        "flips": "U64"
+      },
+      {
+        "trades": "U64"
+      },
+      {
+        "change": "F64"
+      },
+      {
+        "changes": "U64"
+      }
+    ]
+  },
+  "Shifted": {
+    "STRUCT": [
+      {
+        "n": "U64"
+      },
+      {
+        "shift": "F64"
+      },
+      {
+        "s1": "F64"
+      },
+      {
+        "s2": "F64"
+      }
+    ]
+  },
+  "Side": {
+    "STRUCT": [
+      {
+        "bids": "BOOL"
+      },
+      {
+        "levels": {
+          "SEQ": {
+            "TYPENAME": "Level"
+          }
+        }
+      }
+    ]
+  },
+  "State": {
+    "NEWTYPESTRUCT": {
+      "SEQ": {
+        "SEQ": {
+          "TYPENAME": "OpState"
+        }
+      }
+    }
+  },
+  "TDigest": {
+    "STRUCT": [
+      {
+        "merged": {
+          "SEQ": {
+            "TUPLEARRAY": {
+              "CONTENT": "F32",
+              "SIZE": 2
+            }
+          }
+        }
+      },
+      {
+        "unmerged": {
+          "SEQ": "F32"
+        }
+      },
+      {
+        "count": "F64"
+      }
+    ]
+  },
+  "Ticks": {
+    "STRUCT": [
+      {
+        "last": {
+          "OPTION": "F64"
+        }
+      },
+      {
+        "n": {
+          "TUPLEARRAY": {
+            "CONTENT": "U64",
+            "SIZE": 3
+          }
+        }
+      },
+      {
+        "vol": {
+          "TUPLEARRAY": {
+            "CONTENT": "F64",
+            "SIZE": 3
+          }
+        }
+      }
+    ]
+  },
+  "Tie": {
+    "ENUM": {
+      "0": {
+        "None": "UNIT"
+      },
+      "1": {
+        "Int": {
+          "NEWTYPE": "I64"
+        }
+      },
+      "2": {
+        "Str": {
+          "NEWTYPE": "STR"
+        }
+      }
+    }
+  },
+  "Twap": {
+    "STRUCT": [
+      {
+        "xt": "F64"
+      },
+      {
+        "t": "F64"
+      },
+      {
+        "last": {
+          "OPTION": {
+            "TUPLE": [
+              "F64",
+              "I64"
+            ]
+          }
+        }
+      },
+      {
+        "sum": "F64"
+      },
+      {
+        "n": "U64"
+      }
+    ]
+  },
+  "Value": {
+    "ENUM": {
+      "0": {
+        "Null": "UNIT"
+      },
+      "1": {
+        "Bool": {
+          "NEWTYPE": "BOOL"
+        }
+      },
+      "2": {
+        "Int": {
+          "NEWTYPE": "I64"
+        }
+      },
+      "3": {
+        "UInt": {
+          "NEWTYPE": "U64"
+        }
+      },
+      "4": {
+        "F32": {
+          "NEWTYPE": "F32"
+        }
+      },
+      "5": {
+        "F64": {
+          "NEWTYPE": "F64"
+        }
+      },
+      "6": {
+        "Str": {
+          "NEWTYPE": "STR"
+        }
+      },
+      "7": {
+        "Time": {
+          "NEWTYPE": "I64"
+        }
+      },
+      "8": {
+        "Array": {
+          "NEWTYPE": {
+            "SEQ": {
+              "TYPENAME": "Value"
+            }
+          }
+        }
+      }
+    }
+  },
+  "Withhold": {
+    "STRUCT": [
+      {
+        "start": "I64"
+      },
+      {
+        "topics": {
+          "MAP": {
+            "KEY": "STR",
+            "VALUE": "I64"
+          }
+        }
+      },
+      {
+        "awaiting": {
+          "SEQ": "STR"
+        }
+      }
+    ]
+  }
+}
