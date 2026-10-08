@@ -1053,15 +1053,19 @@ CREATE MATERIALIZED VIEW w INTO k AS SELECT ts FROM i;"
         for i in 0..8 {
             assert!(s.row("o", &row(i, Some("big"), "A", None)));
         }
-        for i in 0..3 {
-            assert!(s.row("o", &row(i, Some("small"), "A", None)));
-        }
-        let held: Vec<usize> = s.sinks["o"].open.values().map(Open::held).collect();
-        assert_eq!(held, [0, 3], "the fullest one's rows written as a row group");
         for i in 0..2 {
             assert!(s.row("o", &row(i, Some("small"), "A", None)));
         }
-        assert_eq!(s.sinks["o"].open.values().map(Open::held).collect::<Vec<_>>(), [0, 5], "10 held: not past it");
+        let held = |s: &Sinks| s.sinks["o"].open.values().map(Open::held).collect::<Vec<_>>();
+        assert_eq!(held(&s), [8, 2], "10 held: not past it");
+        // a partition's rows go to its writer `BATCH` at a time
+        assert_eq!(s.sinks["o"].open["day=big"].rows.len(), 8);
+        assert!(s.row("o", &row(2, Some("small"), "A", None)));
+        assert_eq!(held(&s), [0, 3], "past it: the fullest one's rows written as a row group");
+        for i in 0..2 {
+            assert!(s.row("o", &row(i, Some("small"), "A", None)));
+        }
+        assert_eq!(held(&s), [0, 5]);
         s.cut().unwrap().commit(1, later()).unwrap();
         assert_eq!(read_back(&out.display().to_string(), &WRITTEN).len(), 13);
     }
