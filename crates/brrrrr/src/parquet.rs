@@ -222,8 +222,9 @@ impl Sources {
             if !loc.known.insert(f.name.clone()) {
                 continue;
             }
-            let resumed = start && after.as_ref() == Some(&f.name);
-            if after.as_ref().is_none_or(|a| f.name > *a) || resumed {
+            // named after: new (a name listed before is `known`), or at start the file of its
+            // position, read on from its row
+            if after.as_ref().is_none_or(|a| f.name >= *a) {
                 loc.queue.push_back(f);
             } else if !start {
                 if let Some(n) = self.log.allow(now) {
@@ -363,7 +364,8 @@ impl Sources {
         self.locs.iter().all(|l| match (&l.first, &l.at) {
             (None, _) => true,
             (Some(_), None) => false,
-            (Some(first), Some((at, _))) => at > first || at == first && l.done && l.rows.is_empty(),
+            // read whole: `done` comes once its reader has no more and every row went out
+            (Some(first), Some((at, _))) => at > first || at == first && l.done,
         })
     }
 }
@@ -803,16 +805,42 @@ mod tests {
             [chunk("t", "1.parquet", 3, &[11, 12]), chunk("t", "2.parquet", 2, &[20, 21])]
         );
         let mut s = sources(&cat, &at("1.parquet", 3), LIST_EVERY);
-        assert_eq!(drain(&mut s, 10, now), [chunk("t", "2.parquet", 2, &[20, 21])]);
+        let first = s.next(1, now).unwrap();
+        assert_eq!((first.file.rsplit('/').next(), first.offset), (Some("2.parquet"), 1));
+        assert!(!s.past_start(), "the last file there at start, part read");
+        assert_eq!(drain(&mut s, 10, now), [chunk("t", "2.parquet", 2, &[21])]);
+        assert!(s.past_start());
+        let mut s = sources(&cat, &at("2.parquet", 1), LIST_EVERY);
+        assert!(!s.past_start(), "resumed in the last file there at start");
+        assert_eq!(drain(&mut s, 10, now), [chunk("t", "2.parquet", 2, &[21])]);
+        assert!(s.past_start() && s.caught_up());
         let mut s = sources(&cat, &at("2.parquet", 2), LIST_EVERY);
         assert_eq!(drain(&mut s, 10, now), []);
         assert!(s.past_start() && s.caught_up());
+        // a position past every file there (they were deleted since): nothing to replay
+        let s = sources(&cat, &at("3.parquet", 5), LIST_EVERY);
+        assert!(s.past_start());
         // a file of the checkpoint's since deleted: the files named after it
         let mut s = sources(&cat, &at("1a.parquet", 7), LIST_EVERY);
         assert_eq!(drain(&mut s, 10, now), [chunk("t", "2.parquet", 2, &[20, 21])]);
         // another stream's positions are not this one's
         let other = vec![(topic("u", &format!("{path}/2.parquet")), 0, 2)];
         assert_eq!(drain(&mut sources(&cat, &other, LIST_EVERY), 10, now).len(), 2);
+    }
+
+    /// A file of more batches than one (`Reader`'s are 65,536 rows), resumed in its first: the
+    /// rows given out before are skipped once, the rest all read.
+    #[test]
+    fn a_source_resumed_in_a_file_of_several_batches_reads_each_row_after_its_position_once() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("in");
+        let rows: Vec<Row> = (0..70_000).map(|i| trade(i, "A", 1.0)).collect();
+        parquet_file(&dir.join("1.parquet"), &TRADES, &rows);
+        let path = dir.display().to_string();
+        let cat = reading(&[("t", &path, None)]);
+        let mut s = sources(&cat, &[(topic("t", &format!("{path}/1.parquet")), 0, 3)], LIST_EVERY);
+        let got: Vec<i64> = drain(&mut s, 100_000, Instant::now()).into_iter().flat_map(|c| c.3).collect();
+        assert_eq!(got, (3..70_000).collect::<Vec<_>>());
     }
 
     #[test]
