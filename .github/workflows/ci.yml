@@ -59,8 +59,7 @@ jobs:
       - run: |
           docker run -d -p 29090:9090 -e COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS=checkpoints adobe/s3mock:5.2.3
           timeout 120 sh -c 'until curl -s -o /dev/null http://127.0.0.1:29090/; do sleep 1; done'
-      # and the Parquet sources and sinks of `brrrrr run` in an object store
-      - run: cargo nextest run -p brrrrr --bins --test parquet --all-features --run-ignored only -E 'test(/against_s3$/)'
+      - run: cargo nextest run -p brrrrr --bins --all-features --run-ignored only -E 'test(/against_s3$/)'
         env: { BRRRRR_IT_S3: "http://127.0.0.1:29090" }
       - run: scripts/coverage-gate.sh lcov.info
 

@@ -35,7 +35,6 @@
 //! SIGTERM stop the instance.
 use crate::align;
 use crate::metrics::{self, now_ms, Metrics};
-use crate::parquet;
 use crate::store::{self, Store};
 use anyhow::{anyhow, bail, Context, Result};
 use brrrrr_core::checkpoint::{fnv64, Checkpoint, Withhold};
@@ -549,31 +548,6 @@ fn producer_config(brokers: &str, settings: &[(String, String)], fence: Duration
 
 /// Whether external stream `s` is a sink: a view's target. Any other is a source (`Engine::new`
 /// checked each side's data_format).
-/// Rows a file source gives the engine at a time: as a batch of messages, the lease and the
-/// checkpoints are only seen to between two.
-const FILE_CHUNK: usize = 4096;
-
-/// Whether `s` is a file stream (`type = 'file'`, `parquet`).
-pub fn is_file(s: &Stream) -> bool {
-    setting(s, "type") == "file"
-}
-
-/// The options that do not apply to a pipeline's file sinks (`sinks`) or sources (`sources`).
-fn file_options(a: &Args, sinks: bool, sources: bool) -> Result<()> {
-    if sinks && (!a.sink_topic_prefix.is_empty() || !a.sink_topic_template.is_empty()) {
-        bail!("--sink-topic-prefix and --sink-topic-template rename Kafka sinks: a shadow would write its file sinks' files beside this pipeline's (give the shadow's SQL file sinks of another path)");
-    }
-    if sources && a.iggy.is_some() {
-        bail!("--iggy reads Iggy topics: this pipeline reads files");
-    }
-    if sources && a.max_drift.is_some() {
-        bail!(
-            "--max-drift aligns Kafka partitions: several file sources are merged in time order by their time_column"
-        );
-    }
-    Ok(())
-}
-
 pub fn is_sink(cat: &Catalog, s: &Stream) -> bool {
     cat.views.iter().any(|v| v.target == s.name)
 }
@@ -603,18 +577,18 @@ fn brokers(a: &Args, streams: &[&Stream]) -> Result<String> {
 
 /// At most one log line a second per kind, saying how many were left out: a producer-side
 /// schema break or a broker outage would otherwise log at the topic's full rate.
-pub(crate) struct Throttle {
+struct Throttle {
     last: Option<Instant>,
     left_out: u64,
 }
 
 impl Throttle {
-    pub(crate) const fn new() -> Throttle {
+    const fn new() -> Throttle {
         Throttle { last: None, left_out: 0 }
     }
 
     /// `Some(n)`: log this one, and that `n` were left out since the last.
-    pub(crate) fn allow(&mut self, now: Instant) -> Option<u64> {
+    fn allow(&mut self, now: Instant) -> Option<u64> {
         if self.last.is_some_and(|t| now.duration_since(t) < Duration::from_secs(1)) {
             self.left_out += 1;
             return None;
@@ -624,7 +598,7 @@ impl Throttle {
     }
 }
 
-pub(crate) fn left_out(n: u64) -> String {
+fn left_out(n: u64) -> String {
     if n == 0 {
         String::new()
     } else {
@@ -752,7 +726,6 @@ pub fn run(a: Args) -> Result<()> {
     let clock_close = clock_close_margin(a.close_after_ms, a.max_drift, a.partition_wait_ms)?;
     let sql = std::fs::read_to_string(&a.sql)?;
     let mut cat: Catalog = brrrrr_core::sql::parse(&sql).map_err(|e| anyhow!("{}: {e}", a.sql.display()))?;
-    parquet::supported(&cat)?;
     let sink_topics = name_sinks(&mut cat, &a.sink_topic_prefix, &a.sink_topic_template)?;
     let mut engine = Engine::new(&cat).map_err(|e| anyhow!(e))?;
     engine.set_asof(match a.asof {
@@ -764,11 +737,8 @@ pub fn run(a: Args) -> Result<()> {
     }
     engine.set_close_threads(a.close_threads as usize);
     engine.set_close_groups(usize::try_from(a.close_groups).unwrap_or(usize::MAX));
-    // the Kafka topics; file streams are `parquet`'s
-    let external: Vec<&Stream> = cat.streams.values().filter(|s| s.kind == Kind::External && !is_file(s)).collect();
+    let external: Vec<&Stream> = cat.streams.values().filter(|s| s.kind == Kind::External).collect();
     let (sinks, srcs): (Vec<&Stream>, Vec<&Stream>) = external.iter().partition(|s| is_sink(&cat, s));
-    let files: Vec<&Stream> = cat.streams.values().filter(|s| s.kind == Kind::External && is_file(s)).collect();
-    file_options(&a, files.iter().any(|s| is_sink(&cat, s)), files.iter().any(|s| !is_sink(&cat, s)))?;
     let protos = match &a.proto {
         Some(p) => parse_proto(&std::fs::read_to_string(p)?).map_err(|e| anyhow!(e))?,
         None => Default::default(),
@@ -794,7 +764,7 @@ pub fn run(a: Args) -> Result<()> {
         if a.iggy.is_some() { vec![] } else { kafka_settings(a.kafka_config.iter().chain(&a.source_kafka_config))? };
     let sink_settings = kafka_settings(a.kafka_config.iter().chain(&a.sink_kafka_config))?;
     let aligned_defaults = if a.max_drift.is_some() { ALIGNED_DEFAULTS } else { &[] };
-    let consumer: Option<Arc<BaseConsumer>> = if a.iggy.is_none() && !srcs.is_empty() {
+    let consumer: Option<Arc<BaseConsumer>> = if a.iggy.is_none() {
         Some(Arc::new(
             client(&brokers(&a, &srcs)?, &[CONSUMER_DEFAULTS, aligned_defaults].concat(), &source_settings)
                 // aligned consumption needs to know when a partition has nothing more to read
@@ -809,10 +779,8 @@ pub fn run(a: Args) -> Result<()> {
         None
     };
     let failed = Arc::new(AtomicU64::new(0));
-    // a pipeline without Kafka sinks has a producer that sends nothing, and needs no brokers
     let out_brokers = match &a.sink_brokers {
         Some(b) => b.clone(),
-        None if sinks.is_empty() => a.brokers.clone().unwrap_or_default(),
         None => brokers(&a, &sinks)?,
     };
     let Timing { interval, takeover, fence } = Timing::of(a.interval, a.takeover)?;
@@ -868,20 +836,11 @@ pub fn run(a: Args) -> Result<()> {
         return Ok(());
     };
     let restored = restore(store.as_ref(), &mut engine, start, &m)?;
-    let mut file_sinks = parquet::Sinks::open(&cat, &pipeline);
-    // the files of epochs after the restored checkpoint's hold rows the replay writes again
-    if let (Some(f), Some((epoch, ..))) = (&file_sinks, &restored) {
-        let deleted = f.clean(*epoch)?;
-        if !deleted.is_empty() {
-            eprintln!("deleted {} files written after checkpoint {epoch}, to write their rows again", deleted.len());
-        }
-    }
     // the restored windows hold the late rows counted so far: brrrrr_late_events_total, a
     // Prometheus counter, counts this process's from 0, or a restart would read as that many new
     let late_before = engine.late();
     let fresh = restored.is_none();
-    let (_, sources_at, mut sinks_at, restored_withhold) = restored.unwrap_or_default();
-    let mut file_sources = parquet::Sources::open(&cat, &sources_at)?;
+    let (sources_at, mut sinks_at, restored_withhold) = restored.unwrap_or_default();
     // a checkpoint taken on other sink topics (a shadow's, adopted when switching from shadow):
     // those are not this run's to read back, and may be gone
     let before = sinks_at.len();
@@ -925,7 +884,6 @@ pub fn run(a: Args) -> Result<()> {
                         first: *first,
                     })
                     .collect(),
-                None if srcs.is_empty() => vec![], // files: none is known to have lost any
                 None => first_records(&brokers(&a, &srcs)?, &source_settings, sources.keys(), |_| true)?,
             };
             (w.start, w.awaiting) = source_origin(&parts, now);
@@ -961,7 +919,7 @@ pub fn run(a: Args) -> Result<()> {
     // back as far as a replay reaches: a cutover from Proton or a crash before the first
     // checkpoint replays everything the sources still hold
     let topics: Vec<String> = sources.keys().cloned().collect();
-    let horizon = if iggy.is_some() || srcs.is_empty() {
+    let horizon = if iggy.is_some() {
         None
     } else {
         replay_horizon(&brokers(&a, &srcs)?, &source_settings, &topics).unwrap_or_else(|e| {
@@ -971,7 +929,6 @@ pub fn run(a: Args) -> Result<()> {
     };
     let lookback = effective_lookback(a.lookback, horizon);
     match lookback {
-        _ if sink_topics.is_empty() => {}
         None => {
             eprintln!("a source is compacted or keeps its data without limit: the sinks are read back from their start")
         }
@@ -1214,15 +1171,8 @@ pub fn run(a: Args) -> Result<()> {
                 Cut::Encoded { epoch, bytes: bytes.map_err(|e| anyhow!("checkpoint {epoch}: {e}"))? }
             };
             generation += 1;
-            // the files of what the file sinks took before the cut: in place before the checkpoint
-            // is, and while no other instance may take over
-            let files = file_sinks.as_mut().map(parquet::Sinks::cut).transpose()?;
-            let deadline = lease.renewed + fence;
             let (producer, ends, stores, gc) = (producer.clone(), sink_ends.clone(), stores.clone(), gc.clone());
             let thread = std::thread::Builder::new().name(format!("checkpoint-{epoch}")).spawn(move || {
-                if let Some(files) = files {
-                    files.commit(epoch, deadline).with_context(|| format!("checkpoint {epoch}'s files"))?;
-                }
                 let ledger = &producer.context().ledger;
                 let done = finish(cut, ledger, |d| producer.poll(d), &ends, &stores, TIMEOUT);
                 // the oldest checkpoint goes as soon as this one is there, not once the loop sees it
@@ -1330,21 +1280,7 @@ pub fn run(a: Args) -> Result<()> {
                 }
             }
         }
-        // file sources: a chunk of one source's file, or a wait for one until `until`
-        let mut chunk = None;
-        while let Some(f) = file_sources.as_mut() {
-            chunk = f.next(FILE_CHUNK, Instant::now());
-            m.decode_errors.fetch_add(f.errors(), Ordering::Relaxed);
-            if chunk.is_some() || Instant::now() >= until {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        while aligned.is_none()
-            && (consumer.is_some() || iggy.is_some())
-            && batch.len() < 1000
-            && Instant::now() < until
-        {
+        while aligned.is_none() && batch.len() < 1000 && Instant::now() < until {
             if let Some(reader) = &iggy {
                 let before = batch.len();
                 for (i, (topic, partition)) in reader.parts.iter().enumerate() {
@@ -1407,7 +1343,6 @@ pub fn run(a: Args) -> Result<()> {
             producing_for += started.elapsed();
             produced
         });
-        producing.files = file_sinks.as_mut();
         for run in batch.chunk_by(|x, y| (&x.0, x.1) == (&y.0, y.1)) {
             let (topic, partition) = (&run[0].0, run[0].1);
             // a source that had no record when this start had no checkpoint: its feed starts
@@ -1434,31 +1369,19 @@ pub fn run(a: Args) -> Result<()> {
             producing.result()?;
             positions.insert((topic.clone(), partition), run[run.len() - 1].2 + 1);
         }
-        let mut received = batch.len();
-        if let Some(c) = chunk {
-            received += c.rows.len();
-            engine.insert(&c.stream, c.rows, &mut producing);
-            producing.result()?;
-            parquet::prune(&mut positions, &c.stream, &c.file);
-            positions.insert((c.topic, 0), c.offset);
-        }
         if let Some(reader) = &iggy {
             m.consumer_errors.store(reader.failures(), Ordering::Relaxed);
         }
-        m.received.fetch_add(received as u64, Ordering::Relaxed);
-        if received > 0 {
+        m.received.fetch_add(batch.len() as u64, Ordering::Relaxed);
+        if !batch.is_empty() {
             m.consumed_at.store(now_ms(), Ordering::Relaxed);
         }
         if let Some(idle) = a.idle_close {
             let idle_ms = i64::try_from(idle).unwrap_or(i64::MAX).saturating_mul(1000);
             let quiet_since = m.consumed_at.load(Ordering::Relaxed).max(loop_started) as i64;
-            let quiet = |b: &mut Bookkeeper| match &file_sources {
-                Some(f) => f.caught_up(),
-                None => b.quiet(&positions, Instant::now()),
-            };
-            if received > 0 {
+            if !batch.is_empty() {
                 bookkeeper.consumed();
-            } else if now_ms() as i64 - quiet_since >= idle_ms && quiet(&mut bookkeeper) {
+            } else if now_ms() as i64 - quiet_since >= idle_ms && bookkeeper.quiet(&positions, Instant::now()) {
                 // only a source read to its end is quiet: a lagging or unreachable one is not
                 let proof = iggy.as_ref().map(|reader| reader.quiet_at());
                 if let Some(at) = idle_close_target(now_ms() as i64, idle_ms, proof) {
@@ -1467,8 +1390,7 @@ pub fn run(a: Args) -> Result<()> {
                 }
             }
         }
-        let ends_reached = replay_ends.iter().all(|(tp, end)| positions.get(tp).is_some_and(|p| p >= end))
-            && file_sources.as_ref().is_none_or(parquet::Sources::past_start);
+        let ends_reached = replay_ends.iter().all(|(tp, end)| positions.get(tp).is_some_and(|p| p >= end));
         if replaying && ends_reached && caught_up_ms.is_none() {
             caught_up_ms = Some(now_ms() as i64);
         }
@@ -1490,9 +1412,6 @@ pub fn run(a: Args) -> Result<()> {
         producing.result()?;
         let pushed = producing.pushed;
         drop(producing);
-        if let Some(f) = file_sinks.as_mut() {
-            f.result()?;
-        }
         let closed = engine.closed();
         if !batch.is_empty() || pushed > 0 || closed > closed_before {
             batch_metrics(&m, batch_started.elapsed(), producing_for, pushed, closed - closed_before);
@@ -1540,8 +1459,6 @@ pub fn run(a: Args) -> Result<()> {
 struct Producing<'a, F: FnMut(&mut Vec<Emit>) -> Result<()>> {
     out: &'a mut Vec<Emit>,
     produce: F,
-    /// The file sinks, which take their rows as they are (`Output::row`).
-    files: Option<&'a mut parquet::Sinks>,
     stopped: bool,
     failed: Option<anyhow::Error>,
     /// Messages the views wrote (`/metrics`).
@@ -1550,7 +1467,7 @@ struct Producing<'a, F: FnMut(&mut Vec<Emit>) -> Result<()>> {
 
 impl<'a, F: FnMut(&mut Vec<Emit>) -> Result<()>> Producing<'a, F> {
     fn new(out: &'a mut Vec<Emit>, produce: F) -> Self {
-        Producing { out, produce, files: None, stopped: false, failed: None, pushed: 0 }
+        Producing { out, produce, stopped: false, failed: None, pushed: 0 }
     }
 
     /// The error a flush met, once: the loop stops on it.
@@ -1560,10 +1477,6 @@ impl<'a, F: FnMut(&mut Vec<Emit>) -> Result<()>> Producing<'a, F> {
 }
 
 impl<F: FnMut(&mut Vec<Emit>) -> Result<()>> Output for Producing<'_, F> {
-    fn row(&mut self, sink: &str, row: &[brrrrr_core::value::Value]) -> bool {
-        self.files.as_mut().is_some_and(|f| f.row(sink, row))
-    }
-
     fn push(&mut self, e: Emit) {
         self.pushed += 1;
         if !self.stopped {
@@ -2450,9 +2363,9 @@ enum Start {
 /// Offsets by topic and partition, as a checkpoint lists them.
 type Offsets = Vec<(String, i32, i64)>;
 
-/// What `restore` found: the epoch, source and sink offsets of the checkpoint restored, if any,
-/// and what it withholds (None: none recorded, `Checkpoint::of`).
-type Restored = Option<(u64, Offsets, Offsets, Option<Withhold>)>;
+/// What `restore` found: the source and sink offsets of the checkpoint restored, if any, and
+/// what it withholds (None: none recorded, `Checkpoint::of`).
+type Restored = Option<(Offsets, Offsets, Option<Withhold>)>;
 
 /// The epoch of `name` if it is `<epoch:020><suffix>`, as `ckpt` and `released` write them:
 /// exactly 20 digits, so that a hand-placed `7.ckpt` or `+7.ckpt` is not taken for epoch 7.
@@ -2502,7 +2415,7 @@ fn restore(store: &dyn Store, engine: &mut Engine, start: Start, m: &Metrics) ->
         // the walk goes on to the one before it, whose restore replaces any state it had set
         let restored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             Checkpoint::decode(&bytes).and_then(|mut c| {
-                let positions = (e, std::mem::take(&mut c.sources), std::mem::take(&mut c.sinks), c.withhold.take());
+                let positions = (std::mem::take(&mut c.sources), std::mem::take(&mut c.sinks), c.withhold.take());
                 c.restore(engine).map(|()| positions)
             })
         }))
@@ -3882,7 +3795,7 @@ mod store_tests {
         let mut e = engine();
         let m = Metrics::default();
         let r = restore(s.as_ref(), &mut e, Start::Newest, &m).unwrap();
-        assert_eq!(r, Some((2, offsets(50), offsets(5), None)));
+        assert_eq!(r, Some((offsets(50), offsets(5), None)));
         assert_eq!(state(&e), state(&running));
         assert_ne!(state(&e), state(&engine()), "the test proves little with an empty state");
         assert_eq!(m.checkpoints_refused.load(Ordering::Relaxed), 0);
@@ -3904,7 +3817,7 @@ mod store_tests {
         s.create(&ckpt(6), &Checkpoint::of(&other, 6, offsets(1), offsets(1)).encode()).unwrap();
         let (mut e, m) = (engine(), Metrics::default());
         let r = restore(s.as_ref(), &mut e, Start::Newest, &m).unwrap();
-        assert_eq!(r, Some((3, offsets(20), offsets(2), None)));
+        assert_eq!(r, Some((offsets(20), offsets(2), None)));
         assert_eq!(state(&e), state(&good));
         assert_eq!(m.checkpoints_refused.load(Ordering::Relaxed), 3);
     }
@@ -4005,7 +3918,7 @@ mod store_tests {
         write(s.as_ref(), 8, &busy_engine(0, 40), 40);
         let mut e = engine();
         let r = restore(s.as_ref(), &mut e, Start::Epoch(7), &Metrics::default()).unwrap();
-        assert_eq!(r, Some((7, offsets(10), offsets(1), None)));
+        assert_eq!(r, Some((offsets(10), offsets(1), None)));
         assert_eq!(state(&e), state(&old));
         let err = restore(s.as_ref(), &mut engine(), Start::Epoch(6), &Metrics::default()).err().unwrap();
         assert!(err.to_string().contains("--restore-epoch 6: no such checkpoint"), "{err}");
@@ -4806,7 +4719,7 @@ mod store_tests {
         assert_eq!(epochs(s.list().unwrap()).len(), 5);
         let mut replaced = engine();
         let r = restore(dir_store(&dir).as_ref(), &mut replaced, Start::Newest, &Metrics::default()).unwrap();
-        assert_eq!(r, Some((12, offsets(94), offsets(9), None)), "epoch 12's");
+        assert_eq!(r, Some((offsets(94), offsets(9), None)), "epoch 12's");
         assert_eq!(state(&replaced), state(&running));
     }
 }

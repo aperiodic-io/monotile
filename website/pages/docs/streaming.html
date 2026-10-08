@@ -1,7 +1,7 @@
-<!-- title: Streaming pipelines · brrrrr | description: brrrrr run: SQL pipelines from Kafka or Parquet files to Kafka or Parquet files, exactly once, with checkpoints that survive a crash. JSON sources, windows, the SQL they take, options, metrics and Kubernetes. -->
+<!-- title: Streaming pipelines · brrrrr | description: brrrrr run: SQL pipelines from Kafka to Kafka, exactly once, with checkpoints that survive a crash. JSON sources, windows, the SQL they take, options, metrics and Kubernetes. -->
 <p class="eyebrow">Reference</p>
 <h1>Streaming pipelines</h1>
-<p class="lede"><code>brrrrr run</code> runs a SQL pipeline from Kafka topics to Kafka topics: it reads each message as a row, runs your views over the rows as they arrive, and writes each result to a topic exactly once. Sources and sinks can also be <a href="#files">Parquet files</a>, on disk or in an object store. It checkpoints as it goes, so a crash, <code>kill -9</code> or redeploy neither loses a message nor writes one twice.</p>
+<p class="lede"><code>brrrrr run</code> runs a SQL pipeline from Kafka topics to Kafka topics: it reads each message as a row, runs your views over the rows as they arrive, and writes each result to a topic exactly once. It checkpoints as it goes, so a crash, <code>kill -9</code> or redeploy neither loses a message nor writes one twice.</p>
 <pre><code class="sh">$ brrrrr run bars.sql --checkpoints ./checkpoints
 checkpoints: ./checkpoints/bars/2d73620a6f82043b
 claimed the pipeline with checkpoint 1</code></pre>
@@ -50,7 +50,6 @@ $ rpk topic consume bars.1m --format '%v'
 <thead><tr><th>Statement</th><th>Is</th></tr></thead>
 <tbody>
 <tr><td><code>CREATE EXTERNAL STREAM name (columns) SETTINGS type = 'kafka', …</code></td><td>A Kafka topic: a source if it is read, a sink if a view writes into it.</td></tr>
-<tr><td><code>CREATE EXTERNAL STREAM name (columns) SETTINGS type = 'file', data_format = 'Parquet', path = …</code></td><td>Parquet files: a source if it is read, a sink if a view writes into it (<a href="#files">below</a>).</td></tr>
 <tr><td><code>CREATE STREAM name (columns)</code></td><td>A stream between views, held in memory.</td></tr>
 <tr><td><code>CREATE MATERIALIZED VIEW name INTO target AS SELECT …</code></td><td>A query over a stream, its rows written into <code>target</code>, a stream or a sink.</td></tr>
 </tbody></table></div>
@@ -74,25 +73,6 @@ $ rpk topic consume bars.1m --format '%v'
     cast((['redpanda-dedup-key'], [concat(to_string(window_start), '|', symbol)]), 'map(string, string)')
 ) SETTINGS type = 'kafka', topic = 'bars.1m', data_format = 'JSONEachRow', one_message_per_row = true;</code></pre>
 <p>A <code>MATERIALIZED</code> column is computed from the row on every write; a <code>DEFAULT</code> one when the view has no column of its name. A sink column the view does not name gets its type's default.</p>
-
-<h3 id="files">Parquet files</h3>
-<p>A file stream reads or writes Parquet files under its <code>path</code>: a directory, a glob, or a URL (<code>s3://</code>, <code>gs://</code>, <code>az://</code>, credentials from the environment as for <a href="files.html">brrrrr sql</a>). It is a source if a view reads it, a sink if a view writes it. <a href="https://github.com/aperiodic-io/monotile/tree/main/examples/pipelines">examples/pipelines/parquet.sql</a> turns trades in files into bars in files, a directory a day:</p>
-<pre><code class="sql">CREATE EXTERNAL STREAM trades (time datetime64(3), symbol string, price float64, quantity float64)
-SETTINGS type = 'file', data_format = 'Parquet', path = 'trades/';
-
-CREATE EXTERNAL STREAM bars (day string, minute datetime64(3), symbol string, open float64, high float64,
-  low float64, close float64, volume float64, trade_count uint64)
-SETTINGS type = 'file', data_format = 'Parquet', path = 'bars/', partition_by = 'day';</code></pre>
-<div class="tbl"><table>
-<thead><tr><th>Setting</th><th>Of</th><th>Is</th></tr></thead>
-<tbody>
-<tr><td><code>path</code></td><td>both</td><td>Where the files are. A sink's is a directory, not a pattern.</td></tr>
-<tr><td><code>time_column</code></td><td>a source</td><td>With several file sources, each one's time column (a datetime or an integer): their rows go in merged in time order, as an <code>ASOF JOIN</code> of trades to quotes needs.</td></tr>
-<tr><td><code>partition_by</code></td><td>a sink</td><td>Columns, comma-separated, whose values make a Hive directory each (<code>day=2024-01-02/</code>), as <code>COPY … (PARTITION_BY …)</code> writes them; the files then do not hold those columns, and <code>brrrrr sql</code> reads them back from the directory names.</td></tr>
-</tbody></table></div>
-<p><strong>A source</strong> reads its files in name order, a batch at a time, and then the files that land there later: name them so that they sort in time order (<code>trades/2024-01-02T09.parquet</code>, …), and put each in place whole (write it under another name, then rename it). A file that appears named before one already read is not read, and said. A file that does not read (a truncated one) is counted in <code>brrrrr_decode_errors_total</code> and read again a second later. A source's columns are read by name, cast to the declared types, and NULL where a file has none. A pipeline reads Kafka topics or files, not both; <code>--max-drift</code> and <code>--iggy</code> are for topics.</p>
-<p><strong>A sink</strong> writes the rows of each checkpoint interval (<code>--interval</code>) to new files, one per directory, named <code>&lt;pipeline&gt;.&lt;epoch&gt;.&lt;token&gt;.parquet</code>: row groups are encoded as the rows come, and the files are moved (or uploaded) into place before their checkpoint is written. Fewer, larger files take a longer <code>--interval</code>, or a compaction with <code>brrrrr sql "COPY (FROM 'bars/') TO 'bars.parquet'"</code>.</p>
-<p><strong>Exactly once.</strong> A checkpoint is written only once the files of every row before its cut are in place. A crash after a checkpoint's files were put in place and before it was written leaves files whose rows the restart produces again: on restore, the pipeline deletes its own files of epochs after the checkpoint it restored, then replays. So each row is in the files once, whatever kills the pipeline; between a crash and its restart, a reader may see rows that are then deleted and written again. A start without a checkpoint (a first start, <code>--fresh</code>, a changed SQL file) deletes nothing: what its replay produces again is written again. Of a file source, the checkpoint holds the file being read and the rows read of it.</p>
 
 <h3 id="views">Views</h3>
 <p>A view's query is the SQL <code>brrrrr sql</code> takes (<a href="sql.html">the reference</a>), with the pipeline's streams as its tables: <code>WHERE</code>, <code>GROUP BY time_bucket(width, time)</code> and keys, every aggregate (<code>first(x, time)</code>, <code>last</code>, <code>vwap</code>, percentiles, …), <code>HAVING</code>, <code>ASOF JOIN</code> of another stream, <code>CASE</code>, CTEs and subqueries:</p>

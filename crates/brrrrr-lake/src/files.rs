@@ -749,18 +749,6 @@ impl Files {
         Ok(any(p))
     }
 
-    /// Deletes the file `name` (a path, or a URL: a store's object).
-    pub fn delete(&self, name: &str) -> Result<()> {
-        if !is_url(name) || name.starts_with("file://") {
-            let p = name.strip_prefix("file://").unwrap_or(name);
-            return std::fs::remove_file(p).with_context(|| p.to_string());
-        }
-        let url = Url::parse(name).with_context(|| format!("{name}: not a URL"))?;
-        let store = self.store(&url)?;
-        let path = key(&urlencoding_decode(url.path().trim_start_matches('/')));
-        self.rt.block_on(store.delete(&path)).with_context(|| format!("deleting {name}"))
-    }
-
     /// Writes `local` to `url` (an object store's or a file's).
     pub fn upload(&self, local: &Path, to: &str) -> Result<()> {
         if !is_url(to) || to.starts_with("file://") {

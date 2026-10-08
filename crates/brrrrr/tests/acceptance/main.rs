@@ -650,17 +650,6 @@ fn start_on(w: &mut Brrrrr, sql: &str, interval: u64, second: usize) -> tokio::p
         .get_or_insert_with(|| std::env::temp_dir().join(format!("brrrrr-it-{}-{id}", std::process::id())))
         .clone();
     std::fs::create_dir_all(&dir).unwrap();
-    // `{dir}` in a pipeline's SQL is the scenario's directory: its files' (`type = 'file'`)
-    let text = std::fs::read_to_string(root().join(sql)).unwrap();
-    let sql = match text.contains("{dir}") {
-        true => {
-            let copy = dir.join(std::path::Path::new(sql).file_name().unwrap());
-            std::fs::write(&copy, text.replace("{dir}", &dir.display().to_string())).unwrap();
-            copy.display().to_string()
-        }
-        false => sql.to_string(),
-    };
-    let sql = sql.as_str();
     let mut run = brrrrr();
     match &w.s3 {
         // as a pod is configured: a directory on its volume, from the environment
@@ -673,7 +662,7 @@ fn start_on(w: &mut Brrrrr, sql: &str, interval: u64, second: usize) -> tokio::p
     }
     run.args(["run", sql]);
     // a JSONEachRow pipeline runs without one, as users run it
-    if text.contains("ProtobufSingle") {
+    if std::fs::read_to_string(root().join(sql)).unwrap().contains("ProtobufSingle") {
         run.args(["--proto", "fixtures/market.proto"]);
     }
     // a scenario's own --interval (in `extra`) replaces the step's
@@ -909,41 +898,25 @@ async fn runs(w: &mut Brrrrr, path: String, n: usize, kills: String, priceless: 
     let sql = std::fs::read_to_string(root().join(&path)).unwrap();
     let (codec, rows) = (codec(&sql), trades(n, w.priceless));
     let want = expected(&sql, n, w.priceless).len();
-    let mut child = feed_killing(w, &path, &rows, kills, |w, _, part| produce(w, &codec, part)).await;
-    settle(w, None, want).await;
-    (w.metrics, w.health) = (get(w, "/metrics"), get(w, "/health"));
-    child.kill().await.unwrap();
-    (w.sql, w.trades) = (Some(sql), n);
-}
-
-/// Runs `path` while `feed` hands it `rows` (the `i`th slice of them each time), killed `kills`
-/// times on the way: the process running at the end.
-async fn feed_killing(
-    w: &mut Brrrrr,
-    path: &str,
-    rows: &[Vec<Value>],
-    kills: usize,
-    mut feed: impl FnMut(&Brrrrr, usize, &[Vec<Value>]),
-) -> tokio::process::Child {
     // with kills, checkpoints are 2 s apart and each kill lands 0.1-0.9 s after a slice was
     // processed: its windows are mostly in the topic but not covered by a checkpoint, so the
     // restart replays them and only the suppression keeps them from being written twice. The
     // replacement stands by for --takeover (3 * interval): a longer interval would only add
     // waiting to every kill.
     let interval = if kills > 0 { 2 } else { 1 };
-    let mut child = start(w, path, interval);
+    let mut child = start(w, &path, interval);
     // a kill every 8 slices (~7 s): past at least one 2 s checkpoint, so restores are exercised
     let slices = (kills + 1) * 8;
     let mut rng = 0x2545_f491_4f6c_dd1du64;
     for (i, part) in rows.chunks(rows.len().div_ceil(slices)).enumerate() {
-        feed(w, i, part);
+        produce(w, &codec, part);
         rng ^= rng << 13;
         rng ^= rng >> 7;
         rng ^= rng << 17;
         if kills > 0 && i % 8 == 7 && i / 8 < kills {
             tokio::time::sleep(Duration::from_millis(100 + rng % 800)).await;
             child.kill().await.unwrap();
-            child = start(w, path, interval);
+            child = start(w, &path, interval);
             // the replacement stands by until the killed one's lease runs out: let it take over
             // before the next kill, so every kill interrupts a running pipeline
             claimed(w, i / 8 + 2).await;
@@ -951,112 +924,10 @@ async fn feed_killing(
             tokio::time::sleep(Duration::from_millis(200 + rng % 1_300)).await;
         }
     }
-    child
-}
-
-/// The scenario's directory, `{dir}` in its pipelines' SQL.
-fn scenario_dir(w: &mut Brrrrr) -> PathBuf {
-    let id = w.id.0;
-    let dir = w
-        .checkpoints
-        .get_or_insert_with(|| std::env::temp_dir().join(format!("brrrrr-it-{}-{id}", std::process::id())))
-        .clone();
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-/// `rows` of `trades_source` as the Parquet file `<dir>/trades/<i>.parquet`, put in place whole
-/// (`brrrrr sql`'s COPY of them as JSON lines).
-fn trade_file(w: &Brrrrr, sql: &str, i: usize, rows: &[Vec<Value>]) {
-    let dir = w.checkpoints.clone().expect("the scenario's directory");
-    let cat = brrrrr_core::sql::parse(sql).unwrap();
-    let cols: Vec<_> = cat.streams["trades_source"].columns.iter().map(|c| (c.name.clone(), c.ty.clone())).collect();
-    let (encoder, mut lines) = (Encoder::Json(cols), vec![]);
-    for r in rows {
-        encoder.encode(r, &mut lines);
-        lines.push(b'\n');
-    }
-    let json = dir.join(format!("trades-{i:04}.jsonl"));
-    std::fs::write(&json, lines).unwrap();
-    let to = dir.join("trades").join(format!("{i:04}.parquet"));
-    let copy = format!("COPY (FROM '{}') TO '{}'", json.display(), to.display());
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_brrrrr")).args(["sql", &copy]).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-}
-
-/// A pipeline reading its trades from Parquet files (`parquet_to_windows.sql`): each slice of
-/// them a file that appears while it runs.
-#[when(regex = r#"^brrrrr runs "([^"]+)" over (\d+) trades in Parquet files(?:, killed (\d+) times)?$"#)]
-async fn runs_over_files(w: &mut Brrrrr, path: String, n: usize, kills: String) {
-    let kills: usize = kills.parse().unwrap_or(0);
-    let sql = std::fs::read_to_string(root().join(&path)).unwrap();
-    let rows = trades(n, 0);
-    scenario_dir(w);
-    let mut child = feed_killing(w, &path, &rows, kills, |w, i, part| trade_file(w, &sql, i, part)).await;
-    (w.sql, w.trades) = (Some(sql), n);
-    settle_on(w, "test.1m").await;
+    settle(w, None, want).await;
+    (w.metrics, w.health) = (get(w, "/metrics"), get(w, "/health"));
     child.kill().await.unwrap();
-}
-
-/// A pipeline writing its windows to Parquet files (`windows_to_parquet.sql`).
-#[when(regex = r#"^brrrrr runs "([^"]+)" into Parquet files over (\d+) trades(?:, killed (\d+) times)?$"#)]
-async fn runs_into_files(w: &mut Brrrrr, path: String, n: usize, kills: String) {
-    let kills: usize = kills.parse().unwrap_or(0);
-    let sql = std::fs::read_to_string(root().join(&path)).unwrap();
-    let (codec, rows) = (codec(&sql), trades(n, 0));
-    let want = expected(&sql, n, 0).len();
-    scenario_dir(w);
-    let mut child = feed_killing(w, &path, &rows, kills, |w, _, part| produce(w, &codec, part)).await;
     (w.sql, w.trades) = (Some(sql), n);
-    let deadline = Instant::now() + Duration::from_secs(90);
-    while parquet_rows(w, "test.1m").len() < want {
-        assert!(Instant::now() < deadline, "{} of {want} rows: {}", parquet_rows(w, "test.1m").len(), diagnosis(w));
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    tokio::time::sleep(Duration::from_secs(3)).await; // a duplicate would arrive meanwhile
-    child.kill().await.unwrap();
-}
-
-/// Every row of the Parquet files under the scenario's directory `name`, as `brrrrr sql` reads
-/// them, as JSON objects (`normalized`).
-fn parquet_rows(w: &Brrrrr, name: &str) -> Vec<String> {
-    let dir = w.checkpoints.as_ref().expect("the scenario's directory").join(name);
-    let any = std::fs::read_dir(&dir).into_iter().flatten().flatten().any(|d| {
-        std::fs::read_dir(d.path())
-            .into_iter()
-            .flatten()
-            .flatten()
-            .any(|f| f.path().extension().is_some_and(|x| x == "parquet"))
-    });
-    if !any {
-        return vec![];
-    }
-    let query = format!("SELECT symbol, time, n, last, mean FROM '{}'", dir.display());
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_brrrrr"))
-        .args(["sql", "--format", "json", &query])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    String::from_utf8(out.stdout).unwrap().lines().map(normalized).collect()
-}
-
-#[then(regex = r#"^the Parquet files of "([^"]+)" hold exactly the engine's rows for those trades$"#)]
-async fn files_hold_exactly(w: &mut Brrrrr, name: String) {
-    let mut want: Vec<String> =
-        expected(w.sql.as_ref().unwrap(), w.trades, 0).into_iter().map(|(_, payload)| normalized(&payload)).collect();
-    let mut got = parquet_rows(w, &name);
-    assert!(want.len() > 100, "the scenario proves little with {} windows", want.len());
-    want.sort();
-    got.sort();
-    let dups = got.windows(2).filter(|p| p[0] == p[1]).count();
-    assert_eq!(dups, 0, "{dups} duplicated rows");
-    let diff: Vec<_> = got.iter().zip(&want).filter(|(g, w)| g != w).take(3).collect();
-    assert!(
-        diff.is_empty() && got.len() == want.len(),
-        "{} rows, {} wanted; e.g. (got, wanted) {diff:?}",
-        got.len(),
-        want.len()
-    );
 }
 
 /// Order book messages of three symbols as two producer replicas publish them, each with its

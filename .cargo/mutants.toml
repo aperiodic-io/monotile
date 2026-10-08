@@ -223,9 +223,6 @@ exclude_re = [
   "expr\\.rs:.*delete match arm \\[x\\] in call1",
   "expr\\.rs:.*replace match guard \\(0\\.\\.=9999\\)\\.contains\\(&y\\) with false in format_datetime",
   "format\\.rs:.*in scratch$",
-  # Equivalent: how many rows a Parquet sink's open files hold before the fullest writes a row
-  # group (HELD) sets their memory, not their rows (a test sets a small bound and sees it work).
-  "crates/brrrrr/src/parquet\\.rs:.*replace << with >>$",
 ]
 # the acceptance scenarios need a broker (CI runs them in their own job)
 additional_cargo_test_args = ["-E", "not binary(acceptance)"]
@@ -234,6 +231,4 @@ additional_cargo_test_args = ["-E", "not binary(acceptance)"]
 # inputs; a fixture large enough to catch them would be megabytes of random bits. skew_samp and
 # kurt_samp, its callers, are still exercised (line coverage of pow.rs: 100%).
 # examples/ are measuring tools (examples/replay.rs replays captured traffic), not checked code.
-# parquet_stub.rs is the build without the `sql` feature's (the live images'), which refuses
-# file streams; the mutants are built with every feature, where parquet.rs is compiled instead.
-exclude_globs = ["crates/brrrrr-core/src/pow.rs", "crates/brrrrr-core/examples/*", "crates/brrrrr/src/parquet_stub.rs"]
+exclude_globs = ["crates/brrrrr-core/src/pow.rs", "crates/brrrrr-core/examples/*"]

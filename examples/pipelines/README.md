@@ -81,17 +81,3 @@ Clean up with `docker rm -f redpanda && rm -r checkpoints`.
 - Another interval: `time_bucket('5m', time)`; another bar: a second view into a second sink.
 - Filter with `WHERE`, keep groups with `HAVING`, join quotes with `ASOF JOIN`: the view takes
   what `brrrrr sql` takes, as long as its tables are streams read in time order (see the docs).
-
-## Parquet files in and out
-
-[`parquet.sql`](parquet.sql) is the same pipeline over Parquet files: it reads the trades under
-`trades/` (and the files that land there later, in name order) and writes the bars under
-`bars/`, a directory a day, exactly once. No broker is needed:
-
-```sh
-mkdir -p trades && brrrrr sql "COPY (FROM 'examples/pipelines/trades.jsonl') TO 'trades/2024-01-02.parquet'"
-brrrrr run examples/pipelines/parquet.sql --checkpoints ./checkpoints --idle-close 1
-brrrrr sql "FROM 'bars/' ORDER BY minute, symbol"   # in another shell
-```
-
-`--idle-close 1` writes the last minute's bars once a second has passed with no new trade.
