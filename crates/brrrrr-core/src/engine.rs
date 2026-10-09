@@ -1144,8 +1144,8 @@ impl Section {
                 let (mut first, mut dense) = (0, 0);
                 while first < n {
                     // the peers: rows equal on every ORDER BY key
-                    let end = (first + 1..n).find(|&j| c.cmp(&keys[sorted[j]], &keys[sorted[first]]).is_ne());
-                    let end = end.unwrap_or(n);
+                    let peers = sorted[first..].iter().position(|&k| c.cmp(&keys[k], &keys[sorted[first]]).is_ne());
+                    let end = peers.map_or(n, |p| first + p);
                     dense += 1;
                     for (j, &k) in sorted.iter().enumerate().take(end).skip(first) {
                         rows[part[k]][c.slot] = match c.ranked {
@@ -1193,14 +1193,10 @@ impl RankCall {
 fn ntile(i: i64, n: i64, b: i64) -> i64 {
     let b = b.min(n);
     let size = n / b;
-    // the first `large` buckets hold a row more
+    // the first `large` buckets hold a row more: a row in them is behind `i / (size + 1)` full
+    // ones, a row after them behind `(i - large) / size`, the larger of the two
     let large = n - b * size;
-    let in_large = large * (size + 1);
-    if i < in_large {
-        1 + i / (size + 1)
-    } else {
-        1 + large + (i - in_large) / size
-    }
+    1 + (i / (size + 1)).max((i - large) / size)
 }
 
 /// Rows in `ORDER BY` order: by each key in turn, as `order_by` sorts values (NaN, then NULL,

@@ -524,3 +524,77 @@ fn rankings_say_what_to_write() {
     let e = Engine::new(&brrrrr_core::sql::parse(&two).unwrap()).err().unwrap();
     assert!(e.contains("share their first PARTITION BY key, the time"), "{e}");
 }
+
+/// `row_number()` not partitioned by a time first, or without ORDER BY, numbers the rows of
+/// each partition as they come, as before rankings: it is not one.
+#[test]
+fn a_row_number_by_other_keys_or_unordered_numbers_rows_as_they_come() {
+    let rows = prices();
+    assert_eq!(
+        run(
+            "SELECT g, row_number() OVER (PARTITION BY g ORDER BY ts) AS by_g, \
+             row_number() OVER (PARTITION BY ts) AS in_time FROM t WHERE x > 6 ORDER BY ts, g",
+            &rows
+        ),
+        strings(&[
+            &["a", "1", "1"],
+            &["b", "1", "2"],
+            &["a", "2", "1"],
+            &["b", "2", "2"],
+            &["a", "3", "1"],
+            &["b", "3", "2"],
+            &["a", "4", "1"],
+            &["b", "4", "2"],
+            &["c", "1", "3"],
+        ])
+    );
+}
+
+/// A snapshot whose rows held for a ranking are not the plan's rows of one time, under the
+/// empty key, is refused before anything is restored.
+#[test]
+fn a_ranking_s_snapshot_is_checked_before_it_is_restored() {
+    let mut e = engine(LIVE);
+    insert(&mut e, vec![trade(1, "a", Some(1.0)), trade(1, "b", Some(2.0))]);
+    let good = serde_json::to_value(e.snapshot()).unwrap();
+    assert_eq!(good[0][1]["Lead"]["held"][0][0], "", "the section's rows under the empty key: {good}");
+    let restore = |state: &serde_json::Value| engine(LIVE).restore(serde_json::from_value(state.clone()).unwrap());
+    restore(&good).unwrap();
+    let held = |f: &dyn Fn(&mut serde_json::Value)| {
+        let mut s = good.clone();
+        f(&mut s[0][1]["Lead"]["held"]);
+        s
+    };
+    for (what, bad) in [
+        ("another key", held(&|h| h[0][0] = "x".into())),
+        ("no rows", held(&|h| h[0][1] = serde_json::json!([]))),
+        ("a narrower row", held(&|h| _ = h[0][1][1].as_array_mut().unwrap().pop())),
+        ("another time", held(&|h| h[0][1][1][0] = serde_json::json!({"Time": 2 * SEC}))),
+        ("two keys", held(&|h| h.as_array_mut().unwrap().push(serde_json::json!(["", []])))),
+    ] {
+        let e = restore(&bad).expect_err(what);
+        assert!(e.contains("not the plan's rows of one time"), "{what}: {e}");
+    }
+}
+
+/// The historical executor counts a ranking's late rows (rows of a time before the one held) as
+/// the engine does.
+#[test]
+fn the_historical_executor_counts_a_ranking_s_late_rows() {
+    let sql = LIVE
+        .replace("PARTITION BY ts ORDER BY g", "PARTITION BY g ORDER BY g")
+        .replace("PARTITION BY ts", "PARTITION BY g");
+    let cat = brrrrr_core::sql::parse(&sql).unwrap();
+    // g in order but for the third row: a, then b releases a, then a is late
+    let rows: Vec<Row> =
+        ["a", "b", "a", "b", "c"].iter().enumerate().map(|(i, g)| trade(i as i64 + 1, g, Some(1.0))).collect();
+    let mut e = Engine::new(&cat).unwrap();
+    insert(&mut e, rows.clone());
+    assert_eq!(e.late(), 1);
+    let mut h = brrrrr_core::engine::Historical::new(&cat).unwrap();
+    h.set_clock("t", "ts").unwrap();
+    let input: Box<dyn Source> = Box::new(Rows(vec![Batch::from_rows(&rows, 3)]));
+    let mut out = vec![];
+    let stats = h.run(vec![("t".into(), input)], 0..86_400 * SEC, &Serial, &mut out).unwrap();
+    assert_eq!((stats.late, out.len()), (1, 4), "{stats:?}");
+}
