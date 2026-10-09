@@ -9,7 +9,8 @@
 //! - Functions: every aggregate over a frame, `first_value`, `last_value`, `lag(x[, n[,
 //!   default]])`, `row_number()`, and exponential moving averages `avg(x, 'alpha', a)` and
 //!   `avg(x, 'period', n)` (alpha 2 / (n + 1)), as QuestDB spells them. `lead` is the row's own
-//!   `x` here, which the engine's `Lead` after this replaces with the next rows'.
+//!   `x` here, which the engine's `Lead` after this replaces with the next rows'. Ranking
+//!   functions over the rows of each time are the engine's `Section`'s, after this.
 //! - Anchored running totals (QuestDB's `ANCHOR DAILY`) partition by the anchor:
 //!   `sum(q) OVER (PARTITION BY symbol, to_start_of_day(t) ORDER BY t)`.
 //! - Rows are taken in arrival order. A RANGE frame reaches back from the partition's latest

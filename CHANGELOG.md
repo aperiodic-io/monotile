@@ -13,8 +13,9 @@ partitioned directories, and Polars, pandas and pyarrow.
 
 **The time-series vocabulary.** `time_bucket` in any time zone, `first`/`last`, `vwap`, `twap`,
 as-of joins (strict, with a tolerance, at an offset for markouts), window joins, gap filling
-(`locf`, `interpolate`), `lag`/`lead`, `ema` and rolling frames, exact percentiles,
-`count(DISTINCT)`, `FILTER`; joins to subqueries, CTEs and views; `UNION`. What a stream cannot
+(`locf`, `interpolate`), `lag`/`lead`, `ema` and rolling frames, cross-sectional ranks
+(`rank`, `dense_rank`, `row_number`, `percent_rank`, `cume_dist`, `ntile` over the rows of each
+time), exact percentiles, `count(DISTINCT)`, `FILTER`; joins to subqueries, CTEs and views; `UNION`. What a stream cannot
 run is refused with what to write instead. The [cookbook](fixtures/cookbook/cookbook.sql) holds
 the queries people run, each checked against DuckDB's answer.
 

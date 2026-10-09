@@ -127,6 +127,9 @@ enum Op {
     Fill(Box<Fill>),
     /// `lead(...) OVER (...)`: rows held until the rows their `lead` reads come.
     Lead(Box<Lead>),
+    /// `rank() OVER (PARTITION BY time ...)` and the like: each time's rows held until the next
+    /// time's come.
+    Section(Box<Section>),
 }
 
 /// A window group: (window start, key text) -> (key values, accumulators).
@@ -184,7 +187,9 @@ pub enum OpState {
     Fill {
         last: Vec<(String, i64, Row)>,
     },
-    /// `lead`'s partitions, in key order: (key text, the rows held, oldest first).
+    /// `lead`'s partitions, in key order: (key text, the rows held, oldest first). Also an
+    /// `Op::Section`'s rows held, oldest first, under one empty key text when it holds any: the
+    /// same shape, so a section needs no new format.
     Lead {
         held: Vec<(String, Vec<Row>)>,
     },
@@ -325,6 +330,8 @@ impl Op {
                 last.sort_unstable_by(|a, b| a.0.cmp(b.0));
                 OpStateRef::Fill { last }
             }
+            Op::Section(s) if s.held.is_empty() => OpStateRef::Lead { held: vec![] },
+            Op::Section(s) => OpStateRef::Lead { held: vec![("", &s.held)] },
             Op::Lead(l) => {
                 let mut held: Vec<_> = l.held.iter().map(|(k, h)| (k.as_str(), h)).collect();
                 held.sort_unstable_by(|a, b| a.0.cmp(b.0));
@@ -417,6 +424,23 @@ fn check_ops(ops: &[Op], state: &[OpState]) -> R<()> {
                     if !fits || held.iter().filter(|x| x.0 == *key).count() > 1 {
                         return Err(format!("the lead partition {key:?} is not the plan's rows, once"));
                     }
+                }
+            }
+            (Op::Section(s), OpState::Lead { held }) => {
+                // one time's rows, as wide as the plan's, under the empty key
+                let fits = match held.as_slice() {
+                    [] => true,
+                    [(key, rows)] => {
+                        key.is_empty()
+                            && !rows.is_empty()
+                            && rows
+                                .iter()
+                                .all(|r| r.len() == s.width && order_by(&(s.time)(r), &(s.time)(&rows[0])).is_eq())
+                    }
+                    _ => false,
+                };
+                if !fits {
+                    return Err("the rows held for a ranking are not the plan's rows of one time".into());
                 }
             }
             _ => return Err("snapshot does not match the plan".into()),
@@ -553,6 +577,9 @@ fn describe(ops: &[Op], out: &mut String) {
             Op::Lead(l) => {
                 let _ = write!(out, " lead({},{})", l.keys.len(), l.most);
             }
+            Op::Section(s) => {
+                let _ = write!(out, " section({})", s.describe);
+            }
         }
     }
 }
@@ -602,6 +629,9 @@ fn restore_ops(ops: &mut [Op], state: Vec<OpState>) {
             (Op::Lead(l), OpState::Lead { held }) => {
                 l.held = held.into_iter().map(|(k, h)| (k, h.into())).collect();
             }
+            (Op::Section(s), OpState::Lead { held }) => {
+                s.held = held.into_iter().next().map(|(_, h)| h.into()).unwrap_or_default();
+            }
             _ => unreachable!("checked by check_ops"),
         }
     }
@@ -644,6 +674,7 @@ fn all_ops(ops: &[Op]) -> Vec<&Op> {
 fn drops(ops: &[Op]) -> (u64, u64) {
     all_ops(ops).into_iter().fold((0, 0), |(late, null), op| match op {
         Op::Window(w) => (late + w.late, null + w.dropped.null_time),
+        Op::Section(s) => (late + s.late, null),
         Op::Join(j) => (late, null + j.dropped.null_time),
         _ => (late, null),
     })
@@ -674,6 +705,7 @@ fn run(ops: &mut [Op], side: usize, rows: &[Row], limit: i64) -> Vec<Row> {
             Op::Book(b) => b.apply(&rows),
             Op::Fill(f) => f.apply(&rows),
             Op::Lead(l) => l.apply(&rows),
+            Op::Section(s) => s.apply(&rows),
         });
     }
     rows.into_owned()
@@ -713,6 +745,15 @@ fn close(ops: &mut [Op], reached: &[i64], limit: i64) -> (Vec<Row>, i64) {
                 rows = l.apply(&rows);
                 if at == i64::MAX {
                     rows.extend(l.flush());
+                }
+            }
+            Op::Section(s) => {
+                rows = s.apply(&rows);
+                if at == i64::MAX {
+                    rows.extend(s.release());
+                } else if let Some(h) = s.held.front() {
+                    // the rows held come out later, at their time
+                    at = at.min((s.time)(h).i64().unwrap_or(i64::MIN));
                 }
             }
             op => rows = run(std::slice::from_mut(op), 0, &rows, limit),
@@ -1008,6 +1049,157 @@ impl Lead {
             }
         }
         out
+    }
+}
+
+/// What a ranking function gives (`Op::Section`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Ranked {
+    RowNumber,
+    Rank,
+    DenseRank,
+    PercentRank,
+    CumeDist,
+    Ntile(i64),
+}
+
+/// A ranking function's call: what it gives, its slot, its PARTITION BY keys after the time,
+/// and its ORDER BY keys: (key, descending, NULLs first).
+#[derive(Clone)]
+struct RankCall {
+    ranked: Ranked,
+    slot: usize,
+    keys: Vec<Ex>,
+    order: Vec<(Ex, bool, bool)>,
+}
+
+/// The ranking functions of a SELECT (`row_number`, `rank`, `dense_rank`, `percent_rank`,
+/// `cume_dist`, `ntile`), over whole partitions, after the window functions (`Op::Over`, which
+/// leaves their slots NULL). Their first PARTITION BY key is the time, which rows come in the
+/// order of: the rows of one time (a cross-section) are held until a later time's row comes, then
+/// each call ranks each of its partitions (the rest of its PARTITION BY) by its ORDER BY, ties in
+/// the order the rows came, as DuckDB and PostgreSQL define the functions, and the rows leave in
+/// the order they came. A row of an earlier time than the held ones' is late: dropped and
+/// counted. At the end of the input (`close` to the end of time) the rows held are ranked.
+///
+/// ponytail: a live view emits a time's ranks when the next time's first row comes, not when
+/// its sources' clocks pass it; release in `close` when a feed goes quiet if that matters.
+#[derive(Clone)]
+struct Section {
+    time: Ex,
+    calls: Vec<RankCall>,
+    /// The calls as text, for the plan's fingerprint.
+    describe: String,
+    /// The rows' width, to check a snapshot's.
+    width: usize,
+    held: VecDeque<Row>,
+    late: u64,
+}
+
+impl Section {
+    fn apply(&mut self, rows: &[Row]) -> Vec<Row> {
+        let mut out = vec![];
+        for r in rows {
+            if let Some(h) = self.held.front() {
+                match order_by(&(self.time)(r), &(self.time)(h)) {
+                    Ordering::Less => {
+                        self.late += 1;
+                        continue;
+                    }
+                    Ordering::Greater => out.extend(self.release()),
+                    Ordering::Equal => {}
+                }
+            }
+            self.held.push_back(r.clone());
+        }
+        out
+    }
+
+    /// The rows held, each call's slot its rank in its partition.
+    fn release(&mut self) -> Vec<Row> {
+        let mut rows: Vec<Row> = std::mem::take(&mut self.held).into();
+        let mut text = String::new();
+        for c in &self.calls {
+            let mut parts: Vec<Vec<usize>> = vec![];
+            if c.keys.is_empty() {
+                parts.push((0..rows.len()).collect());
+            } else {
+                let mut by_key: FxHashMap<String, usize> = FxHashMap::default();
+                for (i, r) in rows.iter().enumerate() {
+                    key_text(&mut text, c.keys.iter().map(|k| k(r)));
+                    let p = *by_key.entry(text.clone()).or_insert_with(|| {
+                        parts.push(vec![]);
+                        parts.len() - 1
+                    });
+                    parts[p].push(i);
+                }
+            }
+            for part in parts {
+                // ORDER BY's values once a row; a stable sort keeps ties in the order they came
+                let keys: Vec<Vec<Value>> =
+                    part.iter().map(|&i| c.order.iter().map(|o| (o.0)(&rows[i])).collect()).collect();
+                let mut sorted: Vec<usize> = (0..part.len()).collect();
+                sorted.sort_by(|&a, &b| c.cmp(&keys[a], &keys[b]));
+                let n = part.len();
+                let (mut first, mut dense) = (0, 0);
+                while first < n {
+                    // the peers: rows equal on every ORDER BY key
+                    let end = (first + 1..n).find(|&j| c.cmp(&keys[sorted[j]], &keys[sorted[first]]).is_ne());
+                    let end = end.unwrap_or(n);
+                    dense += 1;
+                    for (j, &k) in sorted.iter().enumerate().take(end).skip(first) {
+                        rows[part[k]][c.slot] = match c.ranked {
+                            Ranked::RowNumber => Value::Int(j as i64 + 1),
+                            Ranked::Rank => Value::Int(first as i64 + 1),
+                            Ranked::DenseRank => Value::Int(dense),
+                            Ranked::PercentRank if n > 1 => Value::F64(first as f64 / (n - 1) as f64),
+                            Ranked::PercentRank => Value::F64(0.0),
+                            Ranked::CumeDist => Value::F64(end as f64 / n as f64),
+                            Ranked::Ntile(b) => Value::Int(ntile(j as i64, n as i64, b)),
+                        };
+                    }
+                    first = end;
+                }
+            }
+        }
+        rows
+    }
+}
+
+impl RankCall {
+    /// Two rows' ORDER BY values in the call's order: NULLs first or last as it says, NaN after
+    /// the numbers (`order_by`), each key descending or not.
+    fn cmp(&self, a: &[Value], b: &[Value]) -> Ordering {
+        for ((x, y), &(_, desc, nulls_first)) in a.iter().zip(b).zip(&self.order) {
+            let o = match (x, y) {
+                (Value::Null, Value::Null) => Ordering::Equal,
+                (Value::Null, _) if nulls_first => Ordering::Less,
+                (Value::Null, _) => Ordering::Greater,
+                (_, Value::Null) if nulls_first => Ordering::Greater,
+                (_, Value::Null) => Ordering::Less,
+                _ if desc => order_by(y, x),
+                _ => order_by(x, y),
+            };
+            if o.is_ne() {
+                return o;
+            }
+        }
+        Ordering::Equal
+    }
+}
+
+/// The bucket of the `i`-th of `n` rows (from 0) in `b` buckets as even as can be, the larger
+/// first: DuckDB's and PostgreSQL's `ntile`.
+fn ntile(i: i64, n: i64, b: i64) -> i64 {
+    let b = b.min(n);
+    let size = n / b;
+    // the first `large` buckets hold a row more
+    let large = n - b * size;
+    let in_large = large * (size + 1);
+    if i < in_large {
+        1 + i / (size + 1)
+    } else {
+        1 + large + (i - in_large) / size
     }
 }
 
@@ -1393,6 +1585,8 @@ struct CollectWindows<'a> {
     groups: Vec<OverGroup>,
     /// `lead` calls: (slot, n, default, PARTITION BY ... ORDER BY ... as text, partition keys).
     leads: Vec<(usize, usize, Value, String, Vec<Ex>)>,
+    /// Ranking calls (`Op::Section`): (the time, as text and compiled; the call; the call as text).
+    ranks: Vec<(String, Ex, RankCall, String)>,
 }
 
 impl CollectWindows<'_> {
@@ -1418,6 +1612,74 @@ impl CollectWindows<'_> {
     }
 }
 
+impl CollectWindows<'_> {
+    /// The calls before this one: its result's slot is the next.
+    fn slot(&self) -> usize {
+        self.base + self.groups.iter().map(|g| g.specs.len()).sum::<usize>() + self.ranks.len()
+    }
+
+    /// A ranking function over whole partitions, its first PARTITION BY key the time
+    /// (`Op::Section`).
+    fn rank(
+        &mut self,
+        name: &str,
+        params: &[Value],
+        args: &[Expr],
+        spec: &ast::WindowSpec,
+        described: String,
+    ) -> R<usize> {
+        let ranked = match (name, args) {
+            ("row_number", []) => Ranked::RowNumber,
+            ("rank", []) => Ranked::Rank,
+            ("dense_rank", []) => Ranked::DenseRank,
+            ("percent_rank", []) => Ranked::PercentRank,
+            ("cume_dist", []) => Ranked::CumeDist,
+            ("ntile", [Expr::Value(ast::ValueWithSpan { value: ast::Value::Number(n, _), .. })])
+                if n.parse::<i64>().is_ok_and(|n| n > 0) =>
+            {
+                Ranked::Ntile(n.parse().expect("checked"))
+            }
+            ("ntile", _) => return Err(format!("ntile takes a whole number of buckets from 1: {described}")),
+            _ => return Err(format!("{name} takes no arguments: {described}")),
+        };
+        if !params.is_empty() {
+            return Err(format!("{name} takes no parameters"));
+        }
+        if spec.window_frame.as_ref().is_some_and(|f| !whole_partition(f)) {
+            return Err(format!("{name} ranks the whole partition: it takes no frame, got {described}"));
+        }
+        let Some((time, keys)) = spec.partition_by.split_first() else {
+            return Err(format!(
+                "{name} ranks the rows of each time: PARTITION BY the time first, then any keys: {described}"
+            ));
+        };
+        if spec.order_by.is_empty() {
+            return Err(format!("{name} needs ORDER BY what it ranks by: {described}"));
+        }
+        let compile = |e: &Expr| Compiler::new(self.src).compile(e);
+        let mut order = vec![];
+        for o in &spec.order_by {
+            if o.with_fill.is_some() {
+                return Err(format!("WITH FILL is not supported in a window: {o}"));
+            }
+            let desc = matches!(o.options.sort, Some(ast::OrderBySort::Desc));
+            // NULLs sort as the largest value, as in PostgreSQL and the outermost ORDER BY
+            order.push((compile(&o.expr)?, desc, o.options.nulls_first.unwrap_or(desc)));
+        }
+        let keys = keys.iter().map(compile).collect::<R<Vec<_>>>()?;
+        let call = RankCall { ranked, slot: self.slot(), keys, order };
+        self.ranks.push((time.to_string(), compile(time)?, call, described));
+        Ok(self.ranks.last().expect("pushed").2.slot)
+    }
+}
+
+/// `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`: the whole partition, which a
+/// `row_number()` ranked over the rows of each time says it numbers.
+fn whole_partition(f: &ast::WindowFrame) -> bool {
+    use ast::WindowFrameBound as B;
+    matches!((&f.start_bound, &f.end_bound), (B::Preceding(None), Some(B::Following(None))))
+}
+
 impl Windows for CollectWindows<'_> {
     fn window(&mut self, name: &str, params: &[Value], args: &[Expr], over: &ast::WindowType) -> R<usize> {
         let spec = self.spec(over)?.clone();
@@ -1425,6 +1687,12 @@ impl Windows for CollectWindows<'_> {
             "{name}{params:?}({}) OVER ({spec})",
             args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",")
         );
+        let whole = spec.window_frame.as_ref().is_some_and(whole_partition);
+        if matches!(name, "rank" | "dense_rank" | "percent_rank" | "cume_dist" | "ntile")
+            || name == "row_number" && whole
+        {
+            return self.rank(name, params, args, &spec, described);
+        }
         let mut order = vec![];
         for o in &spec.order_by {
             let desc = o.options.sort.as_ref().is_some_and(|s| !matches!(s, ast::OrderBySort::Asc));
@@ -1480,9 +1748,7 @@ impl Windows for CollectWindows<'_> {
                     (Func::Value { first: false, frame: Frame::Rows(0) }, x)
                 }
             }
-            ("rank" | "dense_rank" | "ntile" | "percent_rank" | "cume_dist" | "nth_value", _) => {
-                return Err(format!("{name} is not supported as a window function"))
-            }
+            ("nth_value", _) => return Err(format!("{name} is not supported as a window function")),
             ("row_number", []) => {
                 no_frame("row_number")?;
                 (Func::RowNumber, vec![])
@@ -1521,7 +1787,7 @@ impl Windows for CollectWindows<'_> {
         let partition = spec.partition_by.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(",");
         let order_key = order.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(",");
         // results follow the input's columns in the order the calls are met
-        let slot = self.base + self.groups.iter().map(|g| g.specs.len()).sum::<usize>();
+        let slot = self.slot();
         let g =
             match self.groups.iter().position(|g| g.specs[0].describe.ends_with(&format!("[{partition}|{order_key}]")))
             {
@@ -2547,6 +2813,7 @@ impl Planner<'_> {
             named: &s.named_window,
             groups: vec![],
             leads: vec![],
+            ranks: vec![],
         };
         let mut c = Compiler::new(&scope);
         c.aliases = aliases(s);
@@ -2588,15 +2855,36 @@ impl Planner<'_> {
             return Err("a string is not a condition: WHERE".into());
         }
         let filter = s.selection.as_ref().map(|w| c.condition(w)).transpose()?;
-        if windows.groups.is_empty() {
+        if windows.groups.is_empty() && windows.ranks.is_empty() {
             if !s.named_window.is_empty() {
                 return Err("a WINDOW clause without a window function".into());
             }
             let all = matches!(s.projection.as_slice(), [SelectItem::Wildcard(_)]);
             p.ops.push(Op::Project { filter, exprs, all });
         } else {
-            let width = p.schema.0.len() + windows.groups.iter().map(|g| g.specs.len()).sum::<usize>();
+            let width = windows.slot();
+            let ranks = std::mem::take(&mut windows.ranks);
             p.ops.push(Op::Over(Box::new(Over { filter, groups: windows.groups, width })));
+            if let Some((time, ..)) = ranks.first() {
+                // one held time for them all
+                if let Some(other) = ranks.iter().find(|r| r.0 != *time) {
+                    return Err(format!(
+                        "the ranking functions of one SELECT share their first PARTITION BY key, the time: {time} and {}",
+                        other.0
+                    ));
+                }
+                let describe = ranks.iter().map(|r| r.3.as_str()).collect::<Vec<_>>().join(",");
+                let time = ranks[0].1.clone();
+                let calls = ranks.into_iter().map(|r| r.2).collect();
+                p.ops.push(Op::Section(Box::new(Section {
+                    time,
+                    calls,
+                    describe,
+                    width,
+                    held: VecDeque::new(),
+                    late: 0,
+                })));
+            }
             if let Some((_, _, _, over, keys)) = windows.leads.first() {
                 // one held order for them all: the next rows of one partition
                 if windows.leads.iter().any(|l| l.3 != *over) {
@@ -3310,7 +3598,12 @@ impl Engine {
     /// Rows dropped as late, summed over every window (in join sides too).
     pub fn late(&self) -> u64 {
         let ops = self.ops().into_iter();
-        ops.map(|o| if let Op::Window(w) = o { w.late } else { 0 }).sum()
+        ops.map(|o| match o {
+            Op::Window(w) => w.late,
+            Op::Section(s) => s.late,
+            _ => 0,
+        })
+        .sum()
     }
 
     /// Closes, in every view, the windows an event at `ts` (µs) would close, without a row,

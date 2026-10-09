@@ -84,7 +84,7 @@ FROM read_parquet('s3://bucket/part-0001');</code></pre>
 <tbody>
 <tr><td><code>lag(x [, n [, default]])</code></td><td><code>x</code> of the row <code>n</code> before.</td></tr>
 <tr><td><code>lead(x [, n [, default]])</code></td><td><code>x</code> of the row <code>n</code> after: the time to the next trade, the next price (<a href="cookbook.html#next_trade">an example</a>). A row comes out when its partition's next rows come in, so its rows are out of time order; a live view emits a row once its next one arrives. The calls of one SELECT share one <code>PARTITION BY</code>.</td></tr>
-<tr><td><code>row_number()</code></td><td>1, 2, 3… within the partition.</td></tr>
+<tr><td><code>row_number()</code></td><td>1, 2, 3… within the partition; partitioned by a time and ordered, a <a href="#ranks">rank</a>.</td></tr>
 <tr><td><code>first_value(x)</code>, <code>last_value(x)</code></td><td>The frame's first and last.</td></tr>
 <tr><td><code>sum</code>, <code>avg</code>, <code>min</code>, <code>max</code>, <code>count</code>, <code>vwap</code>, <code>stddev</code>, … <code>OVER (…)</code></td><td>Running and rolling aggregates: every aggregate above.</td></tr>
 <tr><td><code>ema(x, period) OVER (…)</code>, <code>ema(x, alpha) OVER (…)</code></td><td>Exponential moving average: a period of 1 or more, or a smoothing factor below 1.</td></tr>
@@ -96,6 +96,22 @@ FROM read_parquet('s3://bucket/part-0001');</code></pre>
 FROM 'trades.parquet'
 WINDOW w AS (PARTITION BY symbol ORDER BY ts),
        w20 AS (PARTITION BY symbol ORDER BY ts ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)</code></pre>
+
+<h3 id="ranks">Cross-sectional ranks</h3>
+<p>Ranking functions rank the rows of each time against each other: the symbols of each minute by their return, the venues of each trade time by their price. They partition by a time first (a table's time column, or a time bucket from a subquery), then any keys, and order by anything, <code>ASC</code> or <code>DESC</code>, <code>NULLS FIRST</code> or <code>LAST</code>. NULLs sort as the largest value, as in <code>ORDER BY</code>. Ties are numbered in the order the rows came. A time's rows are ranked when the next time's come: a live view emits them then.</p>
+<div class="tbl"><table>
+<thead><tr><th>Function</th><th>Gives</th></tr></thead>
+<tbody>
+<tr><td><code>rank()</code>, <code>dense_rank()</code></td><td>1 for the first; ties share a rank, and <code>rank</code> skips the places they take.</td></tr>
+<tr><td><code>row_number()</code></td><td>1, 2, 3… in that order; ties in the order the rows came.</td></tr>
+<tr><td><code>percent_rank()</code>, <code>cume_dist()</code></td><td>The share of the rows before (0 to 1), and before or tied.</td></tr>
+<tr><td><code>ntile(n)</code></td><td>The bucket, 1 to <code>n</code>, of buckets as even as can be: quintiles with <code>ntile(5)</code>.</td></tr>
+</tbody></table></div>
+<pre><code class="sql">SELECT minute, symbol, ret,
+       rank() OVER (PARTITION BY minute ORDER BY ret DESC) AS place,
+       ntile(5) OVER (PARTITION BY minute ORDER BY ret) AS quintile
+FROM (SELECT time_bucket('1m', ts) AS minute, symbol, last(price, ts) / first(price, ts) - 1 AS ret
+      FROM 'trades.parquet' GROUP BY minute, symbol)</code></pre>
 
 <h2 id="scalars">Scalar functions</h2>
 <div class="tbl"><table>
@@ -120,7 +136,7 @@ WINDOW w AS (PARTITION BY symbol ORDER BY ts),
 <tr><td><code>sum(DISTINCT x)</code>, <code>avg(DISTINCT x)</code></td><td>The aggregate over a <code>SELECT DISTINCT</code> subquery.</td></tr>
 <tr><td><code>LIMIT</code> or <code>ORDER BY</code> inside a subquery</td><td>Limit and order the outermost query.</td></tr>
 <tr><td><code>sum(x) OVER (PARTITION BY k)</code> without <code>ORDER BY</code></td><td>A <code>GROUP BY k</code> joined back, or a running total ordered by time.</td></tr>
-<tr><td><code>rank()</code></td><td><code>row_number()</code>.</td></tr>
+<tr><td><code>rank() OVER (ORDER BY x)</code>, <code>rank() OVER (PARTITION BY symbol …)</code></td><td><a href="#ranks">Ranks</a> compare the rows of one time: <code>PARTITION BY ts</code>, or by the bucket of a <code>GROUP BY time_bucket(…)</code> subquery (a day's, to rank a day).</td></tr>
 <tr><td><code>lead(x)</code> under a time operation (<code>time_bucket</code>, an as-of join, a window function by time)</td><td><code>lead</code> in the outermost query, or <code>lag</code> the other way: <code>lead</code>'s rows come out of time order.</td></tr>
 <tr><td>A <code>FULL</code> or <code>RIGHT</code> join, or a join matching many rows to many</td><td>Join the other way round, or aggregate one side first.</td></tr>
 </tbody></table></div>

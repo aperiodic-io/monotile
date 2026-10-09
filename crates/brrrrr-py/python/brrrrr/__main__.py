@@ -96,7 +96,7 @@ WORDS = """SELECT FROM WHERE GROUP BY ORDER HAVING LIMIT AS ON AND OR NOT IN IS 
 THEN ELSE END JOIN LEFT ASOF UNION ALL DISTINCT WITH OVER PARTITION INTERVAL DESC ASC CREATE VIEW TABLE
 DROP COPY TO DESCRIBE SHOW TABLES EXPLAIN""".split()
 FUNCTIONS = """avg count count_if first last max min sum median stddev vwap twap time_bucket date_trunc
-to_timestamp epoch_ms lag lead row_number arg_max arg_min quantile_cont coalesce round abs ln sqrt
+to_timestamp epoch_ms lag lead row_number rank dense_rank percent_rank cume_dist ntile arg_max arg_min quantile_cont coalesce round abs ln sqrt
 read_csv read_parquet read_json""".split()
 
 
