@@ -344,6 +344,21 @@ FROM 'trades.csv'
 GROUP BY symbol
 ORDER BY change DESC;
 
+-- name: cross_sectional_rank
+-- section: Screens
+-- title: Symbols ranked against each other every minute
+-- about: Each minute's return per symbol, ranked across the symbols of that minute (1 the
+-- about: best), as a percentile, and in halves: cross-sectional ranks, for momentum and
+-- about: relative-value screens. Ranking functions partition by the time first.
+SELECT minute, symbol, ret,
+       rank() OVER (PARTITION BY minute ORDER BY ret DESC) AS place,
+       percent_rank() OVER (PARTITION BY minute ORDER BY ret) AS pct,
+       ntile(2) OVER (PARTITION BY minute ORDER BY ret, symbol) AS half
+FROM (SELECT time_bucket('1m', ts) AS minute, symbol, last(price, ts) / first(price, ts) - 1 AS ret
+      FROM 'trades.csv' GROUP BY minute, symbol)
+ORDER BY minute, place, symbol
+LIMIT 30;
+
 -- name: hourly_profile
 -- section: Screens
 -- title: Activity by minute of the hour

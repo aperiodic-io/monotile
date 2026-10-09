@@ -37,6 +37,10 @@ The second. `brrrrr_core::query::compile` turns one query into a `Catalog`:
 - `lead(x, n) OVER (PARTITION BY k ...)` holds each partition's rows until their `n`-th next
   ones come (an operator after the window functions; at the end of the input, the defaults), so
   its rows come out of time order and no time operation reads them;
+- `rank() OVER (PARTITION BY ts ... ORDER BY x)` and its kin (`dense_rank`, `percent_rank`,
+  `cume_dist`, `ntile`, `row_number`) rank the rows of each time against each other: an operator
+  after the window functions holds a time's rows until the next time's come (the first PARTITION
+  BY key is a time: a table's clock or a window's bucket), so they leave in time order;
 - a window join, `LEFT JOIN LATERAL (SELECT aggregates FROM r WHERE r.k = l.k AND r.ts BETWEEN
   l.ts - a AND l.ts + b) ON true` (kdb+'s `wj`), is the exact as-of join holding the left row
   until the right side passes `l.ts + b`, then aggregating its key's right rows of the range;

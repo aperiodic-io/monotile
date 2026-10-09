@@ -96,8 +96,8 @@ query gives over the table, emitted as each bar closes.
   directories; S3 (and MinIO, R2), GCS, Azure, HTTP. No load step, no proprietary format.
 - **The time-series vocabulary.** `time_bucket` (in any time zone), `first`/`last`, `vwap`,
   `twap`, `ASOF JOIN` (strict, with a tolerance, or at an offset for markouts), gap filling with
-  `locf` and `interpolate`, `ema`, rolling windows, `lag`, exact percentiles, `count(DISTINCT)`,
-  `FILTER`: the queries quants and engineers run, [in the cookbook](fixtures/cookbook/cookbook.sql),
+  `locf` and `interpolate`, `ema`, rolling windows, `lag`, cross-sectional `rank` and `ntile`,
+  exact percentiles, `count(DISTINCT)`, `FILTER`: the queries quants and engineers run, [in the cookbook](fixtures/cookbook/cookbook.sql),
   each tested against DuckDB's answer.
 - **One semantics, live and historical.** An ad-hoc query, a live view and a streaming pipeline
   are the same engine running the same plan ([ADR-0018](docs/adr/0018-ad-hoc-sql-as-engine-views.md)).

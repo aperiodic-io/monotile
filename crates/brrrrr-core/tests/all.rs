@@ -40,6 +40,8 @@ mod proto;
 mod quantile_cont;
 #[path = "query.rs"]
 mod query;
+#[path = "rank.rs"]
+mod rank;
 #[path = "restore.rs"]
 mod restore;
 #[path = "sequence.rs"]

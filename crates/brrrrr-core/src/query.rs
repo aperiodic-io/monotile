@@ -23,6 +23,10 @@
 //!   (`l.ts - r.ts <= INTERVAL '1 second'`); `[LEFT] JOIN r ON keys`: a lookup of the right row
 //!   of the same keys (the last one, if several);
 //! - `lead(...) OVER (...)`: the engine's `Lead`, its rows out of time order (`unordered`);
+//! - `rank() OVER (PARTITION BY ts ... ORDER BY x)` and its kin (`dense_rank`, `percent_rank`,
+//!   `cume_dist`, `ntile`, and `row_number` partitioned by a time and ordered): the engine's
+//!   `Section`, which ranks each time's rows when the next time's come; the first PARTITION BY
+//!   key is a time (`ranking`), `ts` then the table's clock;
 //! - `LEFT JOIN LATERAL (SELECT aggregates FROM r WHERE keys AND r.ts BETWEEN l.ts - a AND
 //!   l.ts + b) ON true`, or `FROM l, LATERAL (...)`: a window join (the engine's `Within`);
 //! - a subquery or CTE: its own views, into a stream the outer query reads;
@@ -2158,9 +2162,11 @@ impl Ctx<'_> {
         Ok(Scoped { rel: Rel { stream, cols }, qualifier: alias })
     }
 
-    /// Notes the clock each time operation of `s` asks of its sources: OVER (ORDER BY t).
+    /// Notes the clock each time operation of `s` asks of its sources: OVER (ORDER BY t), and
+    /// a ranking's OVER (PARTITION BY t ...).
     fn clocks(&mut self, s: &Select, scopes: &[Scoped]) -> R<()> {
-        let (mut wanted, mut partitions) = (vec![], vec![]);
+        let (mut wanted, mut partitions, mut times) = (vec![], vec![], vec![]);
+        let all: Vec<&Scoped> = scopes.iter().collect();
         for item in &s.projection {
             let mut e = match item {
                 SelectItem::ExprWithAlias { expr, .. } => expr.clone(),
@@ -2169,7 +2175,10 @@ impl Ctx<'_> {
             visit_exprs_mut(&mut e, |x| {
                 if let Expr::Function(f) = x {
                     if let Some(ast::WindowType::WindowSpec(w)) = &f.over {
-                        if let Some(o) = w.order_by.first() {
+                        let name = f.name.to_string().to_ascii_lowercase();
+                        if let Some(time) = ranking(&name, w, &all, &self.ordered, &self.lineage, &self.sources) {
+                            times.push((name, time));
+                        } else if let Some(o) = w.order_by.first() {
                             wanted.push(o.expr.clone());
                         }
                         partitions.push(w.partition_by.clone());
@@ -2178,9 +2187,21 @@ impl Ctx<'_> {
                 ControlFlow::<()>::Continue(())
             });
         }
-        let all: Vec<&Scoped> = scopes.iter().collect();
         for p in partitions {
             self.note_keys(&p, &all);
+        }
+        for (name, time) in times {
+            let Some(time) = time else {
+                return Err(format!(
+                    "{name} ranks the rows of each time: PARTITION BY a time first (a table's time column, \
+                     or a time bucket from a subquery), then any keys"
+                ));
+            };
+            let (sc, col) = resolve_col(&time, &all).expect("a time is a column");
+            let stream = sc.rel.stream.clone();
+            if !self.ordered.contains(&(stream.clone(), col.clone())) {
+                self.clock(&stream, &col, &format!("{name}() OVER (PARTITION BY {time} ...)"))?;
+            }
         }
         for e in wanted {
             let all: Vec<&Scoped> = scopes.iter().collect();
@@ -2198,7 +2219,9 @@ impl Ctx<'_> {
     /// Window functions as the engine computes them: over each partition's rows in the order
     /// they are read, which is its table's time order. `ORDER BY` the time column says so and
     /// is dropped; another order cannot be had. An aggregate without `ORDER BY` is SQL's total
-    /// of the whole partition, which needs its last row before its first: refused.
+    /// of the whole partition, which needs its last row before its first: refused. A ranking
+    /// (`ranking`) keeps its ORDER BY, and a `row_number()` ranked says so with the engine's frame of
+    /// the whole partition.
     fn window_order(&mut self, s: &mut Select, scopes: &[Scoped]) -> R<()> {
         let all: Vec<&Scoped> = scopes.iter().collect();
         let lineage = &self.lineage;
@@ -2213,6 +2236,16 @@ impl Ctx<'_> {
                 let ema = name == "avg" && args(&Expr::Function(f.clone())).len() == 3;
                 let aggregate = crate::agg::is_aggregate(&name) && !ema;
                 let Some(ast::WindowType::WindowSpec(w)) = &mut f.over else { return ControlFlow::Continue(()) };
+                if ranking(&name, w, &all, ordered, lineage, sources).is_some() {
+                    if name == "row_number" {
+                        w.window_frame = Some(ast::WindowFrame {
+                            units: ast::WindowFrameUnits::Rows,
+                            start_bound: ast::WindowFrameBound::Preceding(None),
+                            end_bound: Some(ast::WindowFrameBound::Following(None)),
+                        });
+                    }
+                    return ControlFlow::Continue(());
+                }
                 if w.order_by.is_empty() {
                     if aggregate && w.window_frame.is_none() {
                         err = Some(format!(
@@ -2800,6 +2833,54 @@ fn linear(e: &Expr) -> Option<(Vec<(Expr, i64)>, i64)> {
         }
         _ => None,
     }
+}
+
+/// Whether the window function `name` over `w` ranks whole partitions (the engine's
+/// `Op::Section`): `rank` and its kin, and a `row_number()` partitioned by a time first and
+/// ordered. `Some` of its time, if its first PARTITION BY key is one (`is_time`).
+fn ranking(
+    name: &str,
+    w: &ast::WindowSpec,
+    scopes: &[&Scoped],
+    ordered: &std::collections::HashSet<(String, String)>,
+    lineage: &HashMap<(String, String), Vec<(String, String)>>,
+    sources: &[Source],
+) -> Option<Option<Expr>> {
+    let time = w.partition_by.first().filter(|t| is_time(t, scopes, ordered, lineage, sources)).cloned();
+    match name {
+        "rank" | "dense_rank" | "percent_rank" | "cume_dist" | "ntile" => Some(time),
+        "row_number" if time.is_some() && !w.order_by.is_empty() => Some(time),
+        _ => None,
+    }
+}
+
+/// Whether `e` is a time rows come in the order of: a window's bucket (and copies of it), or a
+/// column copied from tables' time columns: the one each is read in the order of, or a
+/// timestamp of one that no time operation has ordered yet.
+fn is_time(
+    e: &Expr,
+    scopes: &[&Scoped],
+    ordered: &std::collections::HashSet<(String, String)>,
+    lineage: &HashMap<(String, String), Vec<(String, String)>>,
+    sources: &[Source],
+) -> bool {
+    let Some((sc, col)) = resolve_col(e, scopes) else { return false };
+    let key = (sc.rel.stream.clone(), col);
+    let timestamp = |t: &Type| match t {
+        Type::Nullable(t) => matches!(**t, Type::Time(_)),
+        t => matches!(t, Type::Time(_)),
+    };
+    ordered.contains(&key)
+        || lineage.get(&key).is_some_and(|copied| {
+            !copied.is_empty()
+                && copied.iter().all(|(src, c)| {
+                    sources.iter().find(|s| s.stream == *src).is_some_and(|s| match &s.clock {
+                        Clock::Column(x) => x == c,
+                        Clock::Row => s.columns.iter().any(|(n, t)| n == c && timestamp(t)),
+                        _ => false,
+                    })
+                })
+        })
 }
 
 /// A column reference of `scopes` as (its scope, its column).

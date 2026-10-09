@@ -187,7 +187,8 @@ fn window_functions_refuse_what_a_stream_cannot_do() {
     let err = |sel: &str, extra: &str| engine(&view(&[("x".into(), sel.into())], extra)).err().unwrap_or_default();
     let cases = [
         ("lead(p) OVER (ORDER BY ts ROWS 1 PRECEDING)", "lead takes no frame"),
-        ("rank() OVER (ORDER BY ts)", "rank is not supported as a window function"),
+        ("rank() OVER (ORDER BY ts)", "rank ranks the rows of each time: PARTITION BY the time first"),
+        ("nth_value(p, 2) OVER (ORDER BY ts)", "nth_value is not supported as a window function"),
         ("avg(p) OVER (ORDER BY ts ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)", "a frame must end at the current row"),
         ("avg(p) OVER (ORDER BY ts ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING)", "a frame must end at the current row"),
         ("avg(p) OVER (ORDER BY ts GROUPS 1 PRECEDING)", "GROUPS frames are not supported"),
