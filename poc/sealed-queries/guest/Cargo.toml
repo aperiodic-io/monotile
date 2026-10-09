@@ -1,0 +1,17 @@
+[package]
+name = "guest"
+description = "A query as a module: brrrrr's engine and one query, for wasm32 (POC 4) or a native .so (POC 5)."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+brrrrr-core = { path = "../../../crates/brrrrr-core" }
+
+[features]
+# A module that also reads a host file into its result: what an opaque module could do.
+exfil = []

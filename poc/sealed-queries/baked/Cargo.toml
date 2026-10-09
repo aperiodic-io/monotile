@@ -1,0 +1,11 @@
+[package]
+name = "baked"
+description = "POC 3: a query compiled into its own binary, encrypted under a key in that binary."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1"
+sealed = { path = "../host" }

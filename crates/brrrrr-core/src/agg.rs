@@ -171,6 +171,7 @@ pub enum Acc {
 }
 
 // A Value and a tag: l2 alone holds 140k accumulators.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<Acc>() == 32);
 
 /// `twap(price, time)`: each price holds until the next row's time; `last` is the previous
