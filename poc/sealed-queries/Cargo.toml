@@ -1,0 +1,15 @@
+# Proofs of concept for queries the infrastructure runs but cannot read (README.md). A workspace of
+# its own: none of it is in the brrrrr binary, its CI or its dependency checks.
+[workspace]
+resolver = "2"
+members = ["host", "guest", "baked"]
+
+[workspace.package]
+edition = "2021"
+version = "0.0.0"
+license = "Apache-2.0"
+publish = false
+
+[profile.release]
+debug = false
+strip = true
